@@ -5,9 +5,9 @@ from foundry.llm.factory import LLMProviderFactory
 from foundry.llm.base import LLMMessage
 
 
-async def test_vllm_provider():
-    """Test vLLM provider with Qwen model."""
-    print("Testing vLLM Provider with Qwen Model")
+async def test_ollama_provider():
+    """Test Ollama provider with Qwen model."""
+    print("Testing Ollama Provider with Qwen Model")
     print("=" * 50)
     
     try:
@@ -66,11 +66,12 @@ async def test_vllm_provider():
     except Exception as e:
         print(f"\n✗ Error: {e}")
         print("\nTroubleshooting:")
-        print("1. Ensure vLLM server is running: python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-Coder-32B-Instruct --port 8001")
-        print("2. Check VLLM_BASE_URL in .env file")
-        print("3. Verify GPU is available and has sufficient VRAM")
+        print("1. Ensure Ollama is installed and running")
+        print("2. Pull the model: ollama pull qwen2.5-coder:7b")
+        print("3. Check OLLAMA_BASE_URL in .env file (default: http://localhost:11434)")
+        print("4. Verify Ollama is accessible: curl http://localhost:11434/api/tags")
         raise
 
 
 if __name__ == "__main__":
-    asyncio.run(test_vllm_provider())
+    asyncio.run(test_ollama_provider())

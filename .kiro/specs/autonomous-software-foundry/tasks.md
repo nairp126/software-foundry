@@ -15,11 +15,12 @@ This implementation plan focuses on delivering a Minimum Viable Product (MVP) of
 - Basic Project Lifecycle (create, delete)
 - Standard Approval Workflow
 - VS Code Extension (core functionality)
-- **vLLM + Qwen LLM Support (IMPLEMENTED)**
-  - Primary: Qwen2.5-Coder-32B-Instruct for all agents
-  - Fast iteration: Qwen2.5-Coder-14B-Instruct for Reflexion Engine
-  - Fallback: OpenAI/Anthropic (optional)
-  - Cost: ~$110/month electricity vs $500-2000/month for commercial APIs
+- **Ollama + Qwen LLM Support (IMPLEMENTED)**
+  - Primary: Qwen2.5-Coder-7B for all agents (testing/development)
+  - Production: Qwen2.5-Coder-14B or 32B for better quality
+  - Alternative: vLLM (requires Linux/WSL2)
+  - Cost: ~$35-110/month electricity vs $500-2000/month for commercial APIs
+  - Windows/Linux/macOS compatible
 
 ## Tasks
 
@@ -236,36 +237,39 @@ This implementation plan focuses on delivering a Minimum Viable Product (MVP) of
     - Test WebSocket communication and real-time updates
     - _Requirements: API functionality verification_
 
-- [ ] 15. Implement vLLM + Qwen LLM provider integration
+- [ ] 15. Implement Ollama + Qwen LLM provider integration
   - [x] 15.1 Create LLM provider abstraction
     - Implement abstract LLMProvider base class ✅
-    - Add vLLM provider implementation with Qwen models ✅
+    - Add Ollama provider implementation with Qwen models ✅
+    - Add vLLM provider implementation (alternative) ✅
     - Create provider factory for easy instantiation ✅
     - Add basic fallback and retry logic ✅
     - _Requirements: 24.1, 24.4_
-    - _Status: COMPLETED - vLLM provider with Qwen2.5-Coder models implemented_
+    - _Status: COMPLETED - Ollama provider with Qwen2.5-Coder-7B implemented_
 
   - [x] 15.2 Add model selection and configuration
     - Implement model selection per agent type ✅
     - Add cost tracking and token usage monitoring ✅
     - Create configuration system for provider settings ✅
-    - Configure Qwen2.5-Coder-32B-Instruct as default ✅
-    - Configure Qwen2.5-Coder-14B-Instruct for Reflexion Engine ✅
+    - Configure Qwen2.5-Coder-7B as default for development ✅
+    - Support for larger models (14B, 32B) for production ✅
     - _Requirements: 24.2, 24.5, 24.6_
     - _Status: COMPLETED - Configuration in place, ready for agent integration_
 
   - [x] 15.3 Write integration tests for LLM provider
-    - Test vLLM provider connection and generation ✅
+    - Test Ollama provider connection and generation ✅
     - Test streaming functionality ✅
     - Test provider factory and model selection ✅
     - _Requirements: 24.1, 24.2, 24.4, 24.5, 24.6_
     - _Status: COMPLETED - Test script available at src/foundry/llm/test.py_
     
   - [x] 15.4 Create comprehensive documentation
-    - vLLM setup guide with installation instructions ✅
+    - Ollama setup guide with installation instructions ✅
+    - vLLM setup guide (alternative for Linux/production) ✅
+    - Windows setup guide with multiple options ✅
     - LLM configuration guide with provider comparison ✅
     - Integration summary with cost analysis ✅
-    - _Status: COMPLETED - docs/VLLM_SETUP.md, docs/LLM_CONFIGURATION.md, docs/QWEN_INTEGRATION_SUMMARY.md_
+    - _Status: COMPLETED - docs/OLLAMA_SETUP.md, docs/VLLM_SETUP.md, docs/WINDOWS_SETUP.md, docs/LLM_CONFIGURATION.md_
 
 - [ ] 16. Create VS Code extension foundation
   - [ ] 16.1 Set up VS Code extension project
@@ -367,13 +371,14 @@ This implementation plan focuses on delivering a Minimum Viable Product (MVP) of
 - VS Code extension includes core functionality, advanced features deferred
 
 **LLM Implementation (COMPLETED):**
-- ✅ vLLM provider with Qwen2.5-Coder models configured as default
-- ✅ Qwen2.5-Coder-32B-Instruct for all agents (Product Manager, Architect, Engineering, DevOps, Code Review)
-- ✅ Qwen2.5-Coder-14B-Instruct for Reflexion Engine (faster iteration)
+- ✅ Ollama provider with Qwen2.5-Coder-7B configured as default for testing/development
+- ✅ Qwen2.5-Coder-7B for all agents (Product Manager, Architect, Engineering, DevOps, Code Review, Reflexion)
+- ✅ Support for larger models (14B, 32B) for production use
+- ✅ vLLM provider as alternative (requires Linux/WSL2)
 - ✅ OpenAI/Anthropic fallback support (optional, not required)
-- ✅ Cost model: ~$110/month electricity vs $500-2000/month for commercial APIs
-- ✅ Hardware requirements: NVIDIA GPU with 12-24GB VRAM
-- ✅ Comprehensive documentation: VLLM_SETUP.md, LLM_CONFIGURATION.md, QWEN_INTEGRATION_SUMMARY.md
+- ✅ Cost model: ~$35-110/month electricity vs $500-2000/month for commercial APIs
+- ✅ Hardware requirements: 8GB+ VRAM (GPU) or CPU, Windows/Linux/macOS compatible
+- ✅ Comprehensive documentation: OLLAMA_SETUP.md, VLLM_SETUP.md, WINDOWS_SETUP.md, LLM_CONFIGURATION.md
 
 ## MVP Success Criteria
 

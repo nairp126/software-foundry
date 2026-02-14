@@ -28,9 +28,9 @@ The system uses a hierarchical multi-agent architecture with specialized agents:
 - PostgreSQL 16+
 - Redis 7+
 - Neo4j 5.16+
-- NVIDIA GPU with 12GB+ VRAM (for local Qwen models via vLLM)
-- CUDA 11.8+ (for GPU acceleration)
-- **For Windows**: WSL2 or Docker Desktop (vLLM requires Linux environment)
+- **LLM Inference** (choose one):
+  - **Ollama** (recommended for Windows/development): 8GB+ VRAM or CPU
+  - **vLLM** (Linux/production): NVIDIA GPU with 12-24GB VRAM, CUDA 11.8+
 
 ## Quick Start
 
@@ -41,31 +41,29 @@ git clone <repository-url>
 cd autonomous-software-foundry
 ```
 
-### 2. Set up vLLM with Qwen models
+### 2. Set up Ollama with Qwen models
 
-This project uses **Qwen2.5-Coder models** served via **vLLM** for local, cost-effective inference.
+This project uses **Qwen2.5-Coder models** served via **Ollama** for local, Windows-compatible inference.
 
-**Linux/WSL2:**
+**Install Ollama:**
+- Windows: Download from https://ollama.com/download/windows
+- macOS: `brew install ollama`
+- Linux: `curl -fsSL https://ollama.com/install.sh | sh`
+
+**Pull Qwen model:**
 ```bash
-# Install vLLM
-pip install vllm
+# Qwen2.5-Coder 7B (recommended for development)
+ollama pull qwen2.5-coder:7b
 
-# Start vLLM server (requires NVIDIA GPU)
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-Coder-32B-Instruct \
-  --host 0.0.0.0 \
-  --port 8001 \
-  --dtype auto \
-  --max-model-len 8192
+# Verify installation
+ollama list
 ```
 
-**Windows Users:**
-vLLM requires a Linux environment. See [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) for:
-- WSL2 setup (recommended)
-- Docker Desktop setup
-- Ollama alternative (native Windows)
+Ollama runs automatically on `http://localhost:11434`
 
-See [docs/VLLM_SETUP.md](docs/VLLM_SETUP.md) for detailed setup instructions, model options, and troubleshooting.
+See [docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md) for detailed setup instructions and model options.
+
+**Alternative (Linux/WSL2):** For production or larger models, see [docs/VLLM_SETUP.md](docs/VLLM_SETUP.md) for vLLM setup.
 
 ### 3. Set up environment variables
 
@@ -98,7 +96,7 @@ docker-compose exec api alembic upgrade head
 - API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs
 - Neo4j Browser: http://localhost:7474
-- vLLM Server: http://localhost:8001/v1/models
+- Ollama API: http://localhost:11434
 
 ## Development Setup
 

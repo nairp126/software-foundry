@@ -3,6 +3,7 @@
 from typing import Optional
 from foundry.llm.base import BaseLLMProvider
 from foundry.llm.vllm_provider import VLLMProvider
+from foundry.llm.ollama_provider import OllamaProvider
 from foundry.config import settings
 
 
@@ -18,7 +19,7 @@ class LLMProviderFactory:
         """Create LLM provider instance.
         
         Args:
-            provider_name: Provider name (vllm, openai, anthropic)
+            provider_name: Provider name (ollama, vllm, openai, anthropic)
             model_name: Model name to use
             **kwargs: Additional provider-specific configuration
             
@@ -30,7 +31,9 @@ class LLMProviderFactory:
         """
         provider = provider_name or settings.default_llm_provider
         
-        if provider == "vllm":
+        if provider == "ollama":
+            return OllamaProvider(model_name=model_name, **kwargs)
+        elif provider == "vllm":
             return VLLMProvider(model_name=model_name, **kwargs)
         elif provider == "openai":
             # TODO: Implement OpenAI provider

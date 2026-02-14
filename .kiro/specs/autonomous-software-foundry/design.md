@@ -10,12 +10,12 @@
 - ✅ Redis for caching and session management
 - ✅ Docker development environment
 - ✅ Git repository with CI/CD pipeline
-- ✅ **vLLM + Qwen LLM Integration**
-  - vLLM provider with OpenAI-compatible API
-  - Qwen2.5-Coder-32B-Instruct as default model
-  - Qwen2.5-Coder-14B-Instruct for fast iteration
+- ✅ **Ollama + Qwen LLM Integration**
+  - Ollama provider with native API support
+  - Qwen2.5-Coder-7B as default model for testing/development
   - Streaming support for real-time code generation
   - Cost tracking and token usage monitoring
+  - Windows/Linux/macOS compatible
   - Comprehensive documentation
 
 **Next Steps:**
@@ -34,7 +34,7 @@ The foundry addresses critical limitations in current LLM-based coding tools by 
 - **Execution Feedback Loops**: Reflexion engine automatically detects and corrects errors through iterative execution
 - **Autonomous Cloud Deployment**: AWS CDK-based infrastructure provisioning with cost estimation and security scanning
 - **Multi-Agent Specialization**: Domain-specific agents (Product Manager, Architect, Engineering, DevOps, Code Review) with optimized prompts and models
-- **Local LLM Inference**: vLLM with Qwen2.5-Coder models for cost-effective, privacy-focused code generation
+- **Local LLM Inference**: Ollama with Qwen2.5-Coder models for cost-effective, Windows-compatible code generation
 
 The system operates through a four-phase workflow: **Planning → Approval → Execution → Deployment**, with human-in-the-loop controls at critical decision points.
 
@@ -78,7 +78,7 @@ graph TB
     end
     
     subgraph "External Services"
-        LLM[vLLM Server<br/>Qwen2.5-Coder<br/>Local GPU]
+        LLM[Ollama Server<br/>Qwen2.5-Coder<br/>Local GPU/CPU]
         Cloud[AWS/GCP/Azure]
         MCP[MCP Integrations<br/>GitHub/Slack/Linear]
     end
@@ -162,12 +162,13 @@ stateDiagram-v2
 - **Message Queue**: Celery with Redis for background tasks
 
 **LLM Infrastructure (IMPLEMENTED):**
-- **Primary Provider**: vLLM for local inference with OpenAI-compatible API
-- **Default Model**: Qwen2.5-Coder-32B-Instruct (24GB VRAM)
-- **Fast Iteration**: Qwen2.5-Coder-14B-Instruct (12GB VRAM) for Reflexion Engine
+- **Primary Provider**: Ollama for local inference with native API
+- **Default Model**: Qwen2.5-Coder-7B (8GB VRAM, Windows/Linux/macOS compatible)
+- **Production Models**: Qwen2.5-Coder-14B (12GB VRAM) or 32B (24GB VRAM) for better quality
+- **Alternative Provider**: vLLM (requires Linux/WSL2, better performance for production)
 - **Fallback Providers**: OpenAI (GPT-4), Anthropic (Claude 3.5 Sonnet) - optional
-- **Hardware**: NVIDIA GPU with 12-24GB VRAM, CUDA 11.8+
-- **Cost Model**: ~$110/month electricity vs $500-2000/month for commercial APIs
+- **Hardware**: 8GB+ VRAM (GPU recommended) or CPU (slower)
+- **Cost Model**: ~$35-110/month electricity vs $500-2000/month for commercial APIs
 
 **Infrastructure:**
 - **Containerization**: Docker for development, Kubernetes for production
@@ -222,7 +223,7 @@ Transforms natural language requirements into structured Product Requirements Do
 - PRD generation with functional/non-functional requirements
 - Requirements change impact analysis
 
-**Model Selection:** Qwen2.5-Coder-32B-Instruct (default), GPT-4, Claude 3.5 Sonnet, or Llama 3.1 70B for strong reasoning
+**Model Selection:** Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production), GPT-4, Claude 3.5 Sonnet
 
 **Interface:**
 ```python
@@ -244,7 +245,7 @@ Designs system architecture, selects technology stacks, and defines component re
 - File structure organization following best practices
 - Architectural decision documentation with rationale
 
-**Model Selection:** Qwen2.5-Coder-32B-Instruct (default), GPT-4, or Claude 3.5 Sonnet for complex reasoning
+**Model Selection:** Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production), GPT-4, or Claude 3.5 Sonnet for complex reasoning
 
 **Interface:**
 ```python
@@ -267,7 +268,7 @@ Generates clean, maintainable code following architectural specifications.
 - Security best practices integration
 - Component integration and dependency management
 
-**Model Selection:** Qwen2.5-Coder-32B-Instruct (default), GPT-4, Claude 3.5 Sonnet, DeepSeek Coder V2 - code-specialized models
+**Model Selection:** Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production), GPT-4, Claude 3.5 Sonnet, DeepSeek Coder V2 - code-specialized models
 
 **Interface:**
 ```python
@@ -290,7 +291,7 @@ Handles cloud infrastructure provisioning, deployment automation, and cost manag
 - Security scanning and compliance checking
 - Deployment automation with health checks
 
-**Model Selection:** Qwen2.5-Coder-32B-Instruct (default), GPT-4, Claude 3.5 Sonnet - infrastructure-aware models
+**Model Selection:** Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production), GPT-4, Claude 3.5 Sonnet - infrastructure-aware models
 
 **Interface:**
 ```python
@@ -313,7 +314,7 @@ Performs automated code quality analysis, security scanning, and best practices 
 - Automated fix suggestions with explanations
 - Quality metrics tracking over time
 
-**Model Selection:** Qwen2.5-Coder-32B-Instruct (default), GPT-4, or Claude 3.5 Sonnet for comprehensive analysis
+**Model Selection:** Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production), GPT-4, or Claude 3.5 Sonnet for comprehensive analysis
 
 **Interface:**
 ```python
@@ -343,7 +344,7 @@ The self-healing system that automatically detects and corrects errors through i
 - Automated fix generation with context awareness
 - Retry logic with exponential backoff
 
-**Model Selection:** Qwen2.5-Coder-14B-Instruct (default for fast iteration), Qwen2.5-Coder-32B-Instruct (for complex errors)
+**Model Selection:** Qwen2.5-Coder-7B (default for fast iteration), Qwen2.5-Coder-14B/32B (for complex errors)
 
 **Interface:**
 ```python

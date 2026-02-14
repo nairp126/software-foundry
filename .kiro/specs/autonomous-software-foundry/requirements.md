@@ -393,30 +393,31 @@ The Autonomous Software Foundry is an open-source, multi-agent ecosystem that au
 
 **User Story:** As a system administrator, I want flexible LLM provider configuration with support for open-source models, so that I can optimize for cost, performance, and data sovereignty.
 
-**Implementation Status:** ✅ **IMPLEMENTED** - vLLM provider with Qwen2.5-Coder models configured as default
+**Implementation Status:** ✅ **IMPLEMENTED** - Ollama provider with Qwen2.5-Coder-7B configured as default for testing/development
 
 #### Acceptance Criteria
 
 1. WHEN configuring LLM providers, THE Foundry_System SHALL support:
-   - **Primary (Implemented)**: vLLM with Qwen2.5-Coder models (7B, 14B, 32B) for local inference
+   - **Primary (Implemented)**: Ollama with Qwen2.5-Coder models (1.5B, 7B, 14B, 32B) for local inference
+   - **Alternative**: vLLM with Qwen2.5-Coder models (requires Linux/WSL2)
    - **Commercial APIs (Fallback)**: OpenAI (GPT-4, GPT-4-turbo), Anthropic (Claude 3.5 Sonnet), Google (Gemini)
    - **Open-Source Models**: Llama 3.1/3.2, DeepSeek Coder, CodeLlama, StarCoder, Mistral, Mixtral
-   - **Local Inference**: vLLM (implemented), Ollama, LM Studio, llama.cpp
+   - **Local Inference**: Ollama (implemented), vLLM, LM Studio, llama.cpp
    - **Enterprise Deployments**: Azure OpenAI, AWS Bedrock, Google Vertex AI
 2. WHEN selecting models per agent, THE Foundry_System SHALL allow configuration of different models for different agent types:
-   - **Product_Manager_Agent**: Qwen2.5-Coder-32B-Instruct (default), GPT-4, Claude 3.5 Sonnet
-   - **Architect_Agent**: Qwen2.5-Coder-32B-Instruct (default), GPT-4, Claude 3.5 Sonnet
-   - **Engineering_Agent**: Qwen2.5-Coder-32B-Instruct (default), GPT-4, Claude 3.5 Sonnet, DeepSeek Coder V2
-   - **DevOps_Agent**: Qwen2.5-Coder-32B-Instruct (default), GPT-4, Claude 3.5 Sonnet
-   - **Reflexion_Engine**: Qwen2.5-Coder-14B-Instruct (default, faster iteration), Qwen2.5-Coder-32B-Instruct
-   - **Code_Review_Agent**: Qwen2.5-Coder-32B-Instruct (default), GPT-4, Claude 3.5 Sonnet
-3. WHEN open-source models are used, THE Foundry_System SHALL support both API-based access (via OpenRouter, Together AI) and self-hosted inference servers via vLLM (implemented)
-4. WHEN model inference fails, THE Foundry_System SHALL implement automatic fallback chains (e.g., primary: vLLM/Qwen → fallback: OpenAI/GPT-4 → fallback: Anthropic/Claude)
-5. WHEN estimating costs, THE Foundry_System SHALL calculate token usage and costs based on provider pricing with support for custom pricing for self-hosted models (electricity cost amortization: ~$0.15/hour for GPU operation)
+   - **Product_Manager_Agent**: Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production)
+   - **Architect_Agent**: Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production)
+   - **Engineering_Agent**: Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production)
+   - **DevOps_Agent**: Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production)
+   - **Reflexion_Engine**: Qwen2.5-Coder-7B (default, fast iteration)
+   - **Code_Review_Agent**: Qwen2.5-Coder-7B (default for development), Qwen2.5-Coder-14B/32B (production)
+3. WHEN open-source models are used, THE Foundry_System SHALL support both API-based access (via OpenRouter, Together AI) and self-hosted inference servers via Ollama (implemented) or vLLM
+4. WHEN model inference fails, THE Foundry_System SHALL implement automatic fallback chains (e.g., primary: Ollama/Qwen → fallback: vLLM/Qwen → fallback: OpenAI/GPT-4)
+5. WHEN estimating costs, THE Foundry_System SHALL calculate token usage and costs based on provider pricing with support for custom pricing for self-hosted models (electricity cost amortization: ~$0.05-0.15/hour for GPU operation)
 6. WHEN using multiple models, THE Foundry_System SHALL log which model was used for each operation to support cost attribution and quality analysis
 7. WHERE fine-tuned models exist, THE Foundry_System SHALL support loading custom fine-tuned Qwen models or LoRA adapters for specialized domains
 8. WHEN rate limits are hit, THE Foundry_System SHALL implement exponential backoff with jitter and queue requests rather than failing immediately
-9. WHERE data sovereignty is required, THE Foundry_System SHALL allow restriction to on-premise vLLM endpoints only (implemented as default configuration)
+9. WHERE data sovereignty is required, THE Foundry_System SHALL allow restriction to on-premise Ollama or vLLM endpoints only (implemented as default configuration)
 
 ### Requirement 25: Sandbox Environment Specifications & Resource Limits
 
@@ -732,15 +733,16 @@ The Autonomous Software Foundry is an open-source, multi-agent ecosystem that au
 - ✅ Req 19: Basic Lifecycle (create, delete)
 - ✅ Req 21: Standard approval workflow
 - ✅ Req 27: VS Code Extension (core)
-- ✅ **Req 24: vLLM + Qwen LLM Support (IMPLEMENTED)**
+- ✅ **Req 24: Ollama + Qwen LLM Support (IMPLEMENTED)**
 
 **Implementation Notes:**
-- **LLM Provider**: vLLM with Qwen2.5-Coder models configured as default
-  - Primary: Qwen2.5-Coder-32B-Instruct for all agents
-  - Fast iteration: Qwen2.5-Coder-14B-Instruct for Reflexion Engine
+- **LLM Provider**: Ollama with Qwen2.5-Coder-7B configured as default for testing/development
+  - Primary: Qwen2.5-Coder-7B for all agents (8GB VRAM, Windows-compatible)
+  - Production: Qwen2.5-Coder-14B or 32B for better quality
+  - Alternative: vLLM (requires Linux/WSL2, better performance)
   - Fallback: OpenAI/Anthropic (optional, configured but not required)
-- **Cost Model**: Local inference (~$110/month electricity vs $500-2000/month for commercial APIs)
-- **Hardware Requirements**: NVIDIA GPU with 12-24GB VRAM
+- **Cost Model**: Local inference (~$35-110/month electricity vs $500-2000/month for commercial APIs)
+- **Hardware Requirements**: 8GB+ VRAM (GPU) or CPU (slower), Windows/Linux/macOS compatible
 
 **Deferred to Phase 2:**
 - Req 6: Knowledge Graph → Use file-based context
