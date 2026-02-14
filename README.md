@@ -85,11 +85,12 @@ This will start:
 docker-compose exec api alembic upgrade head
 ```
 
-### 5. Access the application
+### 6. Access the application
 
 - API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs
 - Neo4j Browser: http://localhost:7474
+- vLLM Server: http://localhost:8001/v1/models
 
 ## Development Setup
 
