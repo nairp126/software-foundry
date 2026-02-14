@@ -16,6 +16,13 @@ This guide explains how to set up vLLM to serve Qwen coding models locally for t
 - CUDA 11.8 or later
 - Python 3.10 or 3.11
 - 50GB+ free disk space for model weights
+- **Operating System**: Linux (recommended) or WSL2 on Windows
+
+**⚠️ Windows Native Support:**
+vLLM has limited native Windows support due to PyTorch dependency conflicts. Windows users have three options:
+1. **WSL2 (Recommended)**: Run vLLM in Windows Subsystem for Linux 2
+2. **Docker**: Use Docker Desktop with WSL2 backend
+3. **Alternative**: Use Ollama (Windows-native) with Qwen models
 
 ## Recommended Models
 
@@ -36,16 +43,20 @@ This guide explains how to set up vLLM to serve Qwen coding models locally for t
 
 ## Installation
 
-### 1. Install vLLM
+**⚠️ Windows Users**: See [WINDOWS_SETUP.md](WINDOWS_SETUP.md) for Windows-specific instructions using WSL2, Docker, or Ollama.
+
+### 1. Install vLLM (Linux/WSL2)
 
 ```bash
 # Create virtual environment
 python -m venv vllm-env
-source vllm-env/bin/activate  # On Windows: vllm-env\Scripts\activate
+source vllm-env/bin/activate
 
 # Install vLLM with CUDA support
 pip install vllm
 ```
+
+**For Windows**: Use WSL2 (recommended) or Docker. Native Windows installation is not currently supported due to PyTorch dependency conflicts.
 
 ### 2. Download Model (Optional)
 

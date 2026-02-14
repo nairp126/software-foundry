@@ -30,6 +30,7 @@ The system uses a hierarchical multi-agent architecture with specialized agents:
 - Neo4j 5.16+
 - NVIDIA GPU with 12GB+ VRAM (for local Qwen models via vLLM)
 - CUDA 11.8+ (for GPU acceleration)
+- **For Windows**: WSL2 or Docker Desktop (vLLM requires Linux environment)
 
 ## Quick Start
 
@@ -44,6 +45,7 @@ cd autonomous-software-foundry
 
 This project uses **Qwen2.5-Coder models** served via **vLLM** for local, cost-effective inference.
 
+**Linux/WSL2:**
 ```bash
 # Install vLLM
 pip install vllm
@@ -56,6 +58,12 @@ python -m vllm.entrypoints.openai.api_server \
   --dtype auto \
   --max-model-len 8192
 ```
+
+**Windows Users:**
+vLLM requires a Linux environment. See [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) for:
+- WSL2 setup (recommended)
+- Docker Desktop setup
+- Ollama alternative (native Windows)
 
 See [docs/VLLM_SETUP.md](docs/VLLM_SETUP.md) for detailed setup instructions, model options, and troubleshooting.
 
