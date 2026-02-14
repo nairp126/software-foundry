@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     # LLM Providers
     openai_api_key: Optional[str] = Field(default=None)
     anthropic_api_key: Optional[str] = Field(default=None)
+    
+    # vLLM Configuration (for local Qwen models)
+    vllm_base_url: str = Field(default="http://localhost:8001/v1")
+    vllm_api_key: str = Field(default="EMPTY")
+    vllm_model_name: str = Field(default="Qwen/Qwen2.5-Coder-32B-Instruct")
+    
+    # Default LLM Provider
+    default_llm_provider: str = Field(default="vllm")  # vllm, openai, anthropic
 
     # AWS
     aws_region: str = Field(default="us-east-1")

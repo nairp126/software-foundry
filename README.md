@@ -28,6 +28,8 @@ The system uses a hierarchical multi-agent architecture with specialized agents:
 - PostgreSQL 16+
 - Redis 7+
 - Neo4j 5.16+
+- NVIDIA GPU with 12GB+ VRAM (for local Qwen models via vLLM)
+- CUDA 11.8+ (for GPU acceleration)
 
 ## Quick Start
 
@@ -38,14 +40,33 @@ git clone <repository-url>
 cd autonomous-software-foundry
 ```
 
-### 2. Set up environment variables
+### 2. Set up vLLM with Qwen models
+
+This project uses **Qwen2.5-Coder models** served via **vLLM** for local, cost-effective inference.
+
+```bash
+# Install vLLM
+pip install vllm
+
+# Start vLLM server (requires NVIDIA GPU)
+python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen2.5-Coder-32B-Instruct \
+  --host 0.0.0.0 \
+  --port 8001 \
+  --dtype auto \
+  --max-model-len 8192
+```
+
+See [docs/VLLM_SETUP.md](docs/VLLM_SETUP.md) for detailed setup instructions, model options, and troubleshooting.
+
+### 3. Set up environment variables
 
 ```bash
 cp .env.example .env
 # Edit .env with your configuration
 ```
 
-### 3. Start services with Docker Compose
+### 4. Start services with Docker Compose
 
 ```bash
 docker-compose up -d
@@ -58,7 +79,7 @@ This will start:
 - FastAPI application (port 8000)
 - Celery worker
 
-### 4. Run database migrations
+### 5. Run database migrations
 
 ```bash
 docker-compose exec api alembic upgrade head

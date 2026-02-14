@@ -20,7 +20,27 @@ python scripts/validate_setup.py
 
 You should see: `✓ All checks passed! Project setup is complete.`
 
-### 2. Create Environment File
+### 2. Set Up vLLM with Qwen Models
+
+This project uses Qwen coding models served via vLLM for local, cost-effective inference.
+
+See [docs/VLLM_SETUP.md](docs/VLLM_SETUP.md) for detailed setup instructions.
+
+Quick start:
+```bash
+# Install vLLM
+pip install vllm
+
+# Start vLLM server with Qwen model
+python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen2.5-Coder-32B-Instruct \
+  --host 0.0.0.0 \
+  --port 8001 \
+  --dtype auto \
+  --max-model-len 8192
+```
+
+### 3. Create Environment File
 
 Copy the example environment file and configure it:
 
@@ -29,12 +49,12 @@ cp .env.example .env
 ```
 
 Edit `.env` and update the following values:
-- `OPENAI_API_KEY` - Your OpenAI API key
-- `ANTHROPIC_API_KEY` - Your Anthropic API key
-- `AWS_ACCOUNT_ID` - Your AWS account ID (for CDK deployment)
+- `VLLM_BASE_URL` - vLLM server URL (default: http://localhost:8001/v1)
+- `VLLM_MODEL_NAME` - Qwen model name (default: Qwen/Qwen2.5-Coder-32B-Instruct)
+- `AWS_ACCOUNT_ID` - Your AWS account ID (for CDK deployment, optional)
 - `SECRET_KEY` - Generate a secure random key
 
-### 3. Start Infrastructure Services
+### 4. Start Infrastructure Services
 
 Start PostgreSQL, Redis, and Neo4j using Docker Compose:
 
@@ -44,19 +64,19 @@ docker-compose up -d postgres redis neo4j
 
 Wait for services to be healthy (check with `docker-compose ps`).
 
-### 4. Install Python Dependencies
+### 5. Install Python Dependencies
 
 ```bash
 pip install -r requirements-dev.txt
 ```
 
-### 5. Run Database Migrations
+### 6. Run Database Migrations
 
 ```bash
 alembic upgrade head
 ```
 
-### 6. Start the Application
+### 7. Start the Application
 
 #### Option A: Run locally
 ```bash
@@ -68,7 +88,7 @@ uvicorn foundry.main:app --reload
 docker-compose up -d
 ```
 
-### 7. Verify Installation
+### 8. Verify Installation
 
 Visit http://localhost:8000 - you should see:
 ```json
