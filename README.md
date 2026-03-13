@@ -1,8 +1,15 @@
 # Autonomous Software Foundry
 
+![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
+![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi)
+![LangGraph](https://img.shields.io/badge/LangGraph-Agentic-orange)
+![Ollama](https://img.shields.io/badge/Ollama-Local_Inference-black)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
 Multi-agent ecosystem that automates the complete software development lifecycle from natural language requirements to deployed production applications.
 
-## Features
+## ✨ Features
 
 - **Multi-Agent Orchestration**: LangGraph-based coordination of specialized agents
 - **Persistent Project Memory**: Neo4j knowledge graph for semantic code understanding
@@ -10,29 +17,30 @@ Multi-agent ecosystem that automates the complete software development lifecycle
 - **Autonomous Cloud Deployment**: AWS CDK-based infrastructure provisioning
 - **Human-in-the-Loop Controls**: Granular approval workflows at critical decision points
 
-## Architecture
+## 🏗️ Architecture
 
-The system uses a hierarchical multi-agent architecture with specialized agents:
+The system uses a hierarchical multi-agent architecture orchestrated by LangGraph. For a deep dive into the state machine and system design, please see the [**Architecture Documentation**](docs/ARCHITECTURE.md).
+
+### Specialized Agents:
 
 - **Product Manager Agent**: Requirements analysis and PRD generation
 - **Architect Agent**: System design and technology stack selection
 - **Engineering Agent**: Code generation and implementation
-- **DevOps Agent**: Cloud infrastructure and deployment automation
 - **Code Review Agent**: Quality analysis and security scanning
+- **DevOps Agent**: Cloud infrastructure and deployment automation
 - **Reflexion Engine**: Self-healing error correction system
 
-## Prerequisites
+## 📋 Prerequisites
 
 - Python 3.11+
 - Docker and Docker Compose
 - PostgreSQL 16+
 - Redis 7+
 - Neo4j 5.16+
-- **LLM Inference** (choose one):
-  - **Ollama** (recommended for Windows/development): 8GB+ VRAM or CPU
-  - **vLLM** (Linux/production): NVIDIA GPU with 12-24GB VRAM, CUDA 11.8+
+- **LLM Inference**:
+  - **Ollama** (recommended): 8GB+ VRAM or CPU
 
-## Quick Start
+## 🚀 Quick Start
 
 ### 1. Clone the repository
 
@@ -62,8 +70,6 @@ ollama list
 Ollama runs automatically on `http://localhost:11434`
 
 See [docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md) for detailed setup instructions and model options.
-
-**Alternative (Linux/WSL2):** For production or larger models, see [docs/VLLM_SETUP.md](docs/VLLM_SETUP.md) for vLLM setup.
 
 ### 3. Set up environment variables
 
@@ -98,7 +104,7 @@ docker-compose exec api alembic upgrade head
 - Neo4j Browser: http://localhost:7474
 - Ollama API: http://localhost:11434
 
-## Development Setup
+## 🛠️ Development Setup
 
 ### Install dependencies
 
@@ -125,50 +131,54 @@ black src tests
 mypy src
 ```
 
-## Project Structure
+## 📚 Documentation Index
 
-```
-autonomous-software-foundry/
-├── src/foundry/           # Application source code
-│   ├── agents/            # Specialized agent implementations
-│   ├── models/            # Database models
-│   ├── api/               # API endpoints
-│   ├── config.py          # Configuration management
-│   ├── database.py        # Database setup
-│   ├── redis_client.py    # Redis client
-│   └── main.py            # FastAPI application
-├── tests/                 # Test suite
-├── alembic/               # Database migrations
-├── docker-compose.yml     # Docker services configuration
-├── Dockerfile             # Application container
-├── pyproject.toml         # Python project configuration
-└── README.md              # This file
-```
+We maintain comprehensive documentation for all system components in the `docs/` directory:
 
-## Configuration
+| Component | Description |
+| :--- | :--- |
+| [**Architecture & Design**](docs/ARCHITECTURE.md) | LangGraph state machine flow, agent interactions, and DB design |
+| [**Codebase Map**](docs/CODEBASE_MAP.md) | Structured walkthrough of the project repository |
+| [**Local Setup (Ollama)**](docs/OLLAMA_SETUP.md) | Guide to running Qwen models locally |
+| [**Reflexion Engine**](docs/REFLEXION_ENGINE.md) | Details on the execute-analyze-fix self-healing loop |
+| [**Project Lifecycle**](docs/PROJECT_LIFECYCLE.md) | How projects are created, managed, and archived |
+| [**Testing & QA**](docs/TESTING_QA.md) | Automated testing guidelines and quality gates |
+| [**Agent Orchestration**](docs/AGENT_ORCHESTRATION_API.md) | API reference for the LangGraph orchestrator |
+| [**Approval Workflow**](docs/APPROVAL_WORKFLOW.md) | Human-in-the-loop review processes |
+| [**Authentication**](docs/API_AUTHENTICATION_GUIDE.md) | Securing FastAPI endpoints |
+| [**Git Integration**](docs/GIT_INTEGRATION.md) | Automated version control workflows |
 
-Key environment variables:
+## ⚙️ Configuration
+
+Key environment variables to run the Foundry locally:
 
 - `DATABASE_URL`: PostgreSQL connection string
 - `REDIS_URL`: Redis connection string
 - `NEO4J_URI`: Neo4j connection URI
-- `OPENAI_API_KEY`: OpenAI API key for LLM access
-- `ANTHROPIC_API_KEY`: Anthropic API key for Claude models
+- `DEFAULT_LLM_PROVIDER`: Set to `ollama`
+- `OLLAMA_BASE_URL`: Full URL to your local Ollama instance (default: `http://localhost:11434`)
+- `OLLAMA_MODEL_NAME`: e.g., `qwen2.5-coder:7b`
 
-See `.env.example` for complete configuration options.
+*(Optional Commercial Providers)*
+- `OPENAI_API_KEY`: OpenAI API key
+- `ANTHROPIC_API_KEY`: Anthropic API key
 
-## Contributing
+See `.env.example` and [**SETUP.md**](SETUP.md) for complete configuration options.
+
+## 🤝 Contributing
+
+We welcome contributions! Please review our [**Contributing Guide**](CONTRIBUTING.md) before submitting pull requests.
 
 1. Fork the repository
-2. Create a feature branch
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
-4. Run tests and linting
+4. Run formatting and tests (`make format`, `make lint`, `make typecheck`)
 5. Submit a pull request
 
-## License
+## 📄 License
 
 [License information to be added]
 
-## Support
+## 💬 Support
 
 For issues and questions, please open an issue on GitHub.

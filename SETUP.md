@@ -279,11 +279,6 @@ OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL_NAME=qwen2.5-coder:7b
 DEFAULT_LLM_PROVIDER=ollama
 
-# Alternative: vLLM (requires Linux/WSL2)
-# VLLM_BASE_URL=http://localhost:8001/v1
-# VLLM_API_KEY=EMPTY
-# VLLM_MODEL_NAME=Qwen/Qwen2.5-Coder-32B-Instruct
-# DEFAULT_LLM_PROVIDER=vllm
 
 # Optional: Commercial LLM Providers
 # OPENAI_API_KEY=your_openai_key_here
@@ -337,29 +332,8 @@ ollama run qwen2.5-coder:7b "Write a hello world in Python"
 
 See [docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md) for detailed instructions.
 
-#### Option B: vLLM (For Production/Linux)
 
-**Advantages:** Better performance, larger models, production-ready
-
-```bash
-# Install vLLM (Linux only, or WSL2 on Windows)
-pip install vllm
-
-# Start vLLM server
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-Coder-32B-Instruct \
-  --host 0.0.0.0 \
-  --port 8001 \
-  --dtype auto \
-  --max-model-len 8192
-
-# Update .env
-# DEFAULT_LLM_PROVIDER=vllm
-```
-
-See [docs/VLLM_SETUP.md](docs/VLLM_SETUP.md) for detailed instructions.
-
-#### Option C: Commercial APIs (OpenAI/Anthropic)
+#### Option B: Commercial APIs (OpenAI/Anthropic)
 
 ```bash
 # Add to .env
@@ -1202,8 +1176,8 @@ DATABASE_URL=postgresql://user:pass@prod-db:5432/foundry_db
 REDIS_URL=redis://prod-redis:6379/0
 
 # Use production LLM provider
-DEFAULT_LLM_PROVIDER=vllm
-VLLM_BASE_URL=http://llm-server:8001/v1
+DEFAULT_LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://llm-server:11434
 ```
 
 ### Load Environment Files
@@ -1447,7 +1421,7 @@ autonomous-software-foundry/
 │   └── script.py.mako     # Migration template
 ├── docs/                   # Documentation
 │   ├── OLLAMA_SETUP.md
-│   ├── VLLM_SETUP.md
+
 │   ├── WINDOWS_SETUP.md
 │   ├── LLM_CONFIGURATION.md
 │   ├── API_AUTHENTICATION_GUIDE.md
@@ -1545,7 +1519,7 @@ autonomous-software-foundry/
 - **Neo4j**: https://neo4j.com/docs/
 - **Docker**: https://docs.docker.com/
 - **Ollama**: https://ollama.com/
-- **vLLM**: https://docs.vllm.ai/
+
 - **Qwen Models**: https://huggingface.co/Qwen
 
 ### Community and Support
@@ -1600,7 +1574,7 @@ Now that you have the project set up, here are some suggested next steps:
 ### Q: How much does it cost to run?
 
 **A:** 
-- **Local (Ollama/vLLM)**: ~$35-110/month in electricity
+- **Local (Ollama)**: ~$35-110/month in electricity
 - **OpenAI GPT-4**: ~$500-2000/month
 - **Anthropic Claude**: ~$300-1500/month
 - **Infrastructure (Docker)**: Free for development
@@ -1615,13 +1589,11 @@ Now that you have the project set up, here are some suggested next steps:
 - ⚠️ Agent orchestration is still in development
 - ⚠️ Full end-to-end workflows not yet complete
 
-### Q: What's the difference between Ollama and vLLM?
+### Q: How do I configure Ollama?
 
 **A:**
-- **Ollama**: Easier setup, cross-platform, good for development
-- **vLLM**: Better performance, Linux-only, better for production
-
-See [docs/LLM_CONFIGURATION.md](docs/LLM_CONFIGURATION.md) for detailed comparison.
+- **Ollama**: Easier setup, cross-platform, good for development.
+See [docs/LLM_CONFIGURATION.md](docs/LLM_CONFIGURATION.md) for detailed configuration.
 
 ### Q: How do I contribute?
 

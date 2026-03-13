@@ -236,9 +236,6 @@ response = await engine.process_message(task_message)
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL_NAME=qwen2.5-coder:7b
 
-# Alternative: vLLM configuration
-VLLM_BASE_URL=http://localhost:8001/v1
-VLLM_MODEL_NAME=Qwen/Qwen2.5-Coder-32B-Instruct
 
 # Default provider
 DEFAULT_LLM_PROVIDER=ollama

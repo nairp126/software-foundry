@@ -440,12 +440,6 @@ curl http://localhost:11434/api/generate -d '{
 - **Monthly**: ~$35-110 (24/7 operation)
 - **Total Year 1**: $35-610
 
-### vLLM (Local)
-- **Hardware**: $800-1500 (high-end GPU required)
-- **Electricity**: ~$0.15/hour
-- **Monthly**: ~$110
-- **Total Year 1**: $910-1610
-
 ### OpenAI GPT-4
 - **Hardware**: $0
 - **API Costs**: $500-2000/month
