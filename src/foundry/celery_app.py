@@ -21,4 +21,4 @@ celery_app.conf.update(
 )
 
 # Auto-discover tasks
-celery_app.autodiscover_tasks(["foundry.agents"])
+celery_app.autodiscover_tasks(["foundry.agents", "foundry.tasks"])

@@ -3,6 +3,7 @@
 import pytest
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.pool import NullPool
 from foundry.database import Base
 from foundry.config import settings
 
@@ -11,10 +12,10 @@ TEST_DATABASE_URL = settings.database_url.replace("foundry_db", "foundry_db_test
 TEST_DATABASE_URL = TEST_DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 async def test_engine():
     """Create test database engine."""
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+    engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
     
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -37,5 +38,23 @@ async def db_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
     )
     
     async with async_session() as session:
-        yield session
-        await session.rollback()
+        async with session.begin():
+            yield session
+            await session.rollback()
+
+
+@pytest.fixture(scope="function")
+async def redis_client():
+    """Create test Redis client."""
+    from foundry.redis_client import redis_client
+    
+    # Connect to Redis
+    await redis_client.connect()
+    
+    yield redis_client
+    
+    # Clean up test data
+    await redis_client.client.flushdb()
+    
+    # Disconnect
+    await redis_client.disconnect()

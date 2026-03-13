@@ -27,7 +27,22 @@ class OllamaProvider(BaseLLMProvider):
             **kwargs
         )
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
-        self.client = httpx.AsyncClient(timeout=300.0)
+        # Use separate timeouts: fast connection, longer read
+        # Increased to 300.0 for very long generations
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0))
+    
+    async def _check_connection(self):
+        """Verify connection to Ollama server."""
+        try:
+            response = await self.client.get(f"{self.base_url}/api/tags")
+            response.raise_for_status()
+        except httpx.ConnectError:
+            raise ConnectionError(
+                f"Could not connect to Ollama at {self.base_url}. "
+                "Please ensure Ollama is running (e.g., 'ollama serve')."
+            )
+        except Exception as e:
+             raise ConnectionError(f"Ollama connection check failed: {str(e)}")
     
     async def generate(
         self,
@@ -67,6 +82,14 @@ class OllamaProvider(BaseLLMProvider):
         
         payload["options"].update(kwargs)
         
+        # Proactive connection check
+        try:
+            await self._check_connection()
+        except ConnectionError as e:
+            # Re-raise as a clean error message, or log a warning
+            print(f"Error: {e}")
+            raise
+
         response = await self.client.post(
             f"{self.base_url}/api/chat",
             json=payload,
