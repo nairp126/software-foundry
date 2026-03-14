@@ -39,11 +39,18 @@ class EngineerAgent(Agent):
         "error_message_sanitization": True
     }
     
-    def __init__(self, model_name: str = "qwen2.5-coder:7b"):
+    def __init__(self, model_name: Optional[str] = None):
         super().__init__(AgentType.ENGINEER, model_name)
-        self.llm = LLMProviderFactory.create_provider(model_name=model_name)
-        self.test_generator = TestGenerator(model_name)
+        self.llm = LLMProviderFactory.create_provider(model_name=self.model_name)
+        self.test_generator = TestGenerator(self.model_name)
         self.quality_gates = QualityGates()
+        
+        # Knowledge Graph integration for context-aware code generation
+        try:
+            from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
+            self.kg_tools = KnowledgeGraphTools()
+        except ImportError:
+            self.kg_tools = None
         
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         if message.message_type == MessageType.TASK:

@@ -29,7 +29,7 @@ class OllamaProvider(BaseLLMProvider):
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
         # Use separate timeouts: fast connection, longer read
         # Increased to 300.0 for very long generations
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0))
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     
     async def _check_connection(self):
         """Verify connection to Ollama server."""
@@ -41,6 +41,12 @@ class OllamaProvider(BaseLLMProvider):
                 f"Could not connect to Ollama at {self.base_url}. "
                 "Please ensure Ollama is running (e.g., 'ollama serve')."
             )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise ConnectionError(
+                    f"Ollama API endpoint not found at {self.base_url}. "
+                    "Make sure you are using a recent version of Ollama."
+                )
         except Exception as e:
              raise ConnectionError(f"Ollama connection check failed: {str(e)}")
     
@@ -94,6 +100,8 @@ class OllamaProvider(BaseLLMProvider):
             f"{self.base_url}/api/chat",
             json=payload,
         )
+        if response.status_code == 404:
+             raise ConnectionError(f"Model '{self.model_name}' not found in Ollama. Please run 'ollama pull {self.model_name}'")
         response.raise_for_status()
         
         data = response.json()

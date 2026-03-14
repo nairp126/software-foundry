@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from foundry.models.project import Project, ProjectStatus
 from foundry.services.git_service import git_service
+from foundry.services.knowledge_graph import knowledge_graph_service
+from foundry.graph.ingestion import ingestion_pipeline
 
 
 class ProjectService:
@@ -74,6 +76,22 @@ class ProjectService:
         project.generated_path = project_dir
         
         await session.flush()  # Flush the updated path
+        
+        # Initialize Knowledge Graph for this project
+        try:
+            await knowledge_graph_service.create_project(
+                project_id=str(project.id),
+                name=name,
+                metadata={
+                    "description": description,
+                    "created_at": project.created_at.isoformat(),
+                    "requirements": requirements,
+                }
+            )
+        except Exception as e:
+            # Log error but don't fail project creation
+            # Knowledge Graph is an enhancement, not a requirement
+            print(f"Warning: Failed to initialize Knowledge Graph: {e}")
         
         return project
 
@@ -331,10 +349,48 @@ class ProjectService:
         Returns:
             Number of nodes deleted
         """
-        # Stubbed for MVP - Neo4j integration pending
-        # In production, this would execute:
-        # MATCH (n) WHERE n.project_id = $project_id DETACH DELETE n
-        return 0
+        try:
+            await knowledge_graph_service.clear_project(str(project.id))
+            return 1  # Successfully cleared
+        except Exception as e:
+            print(f"Warning: Failed to clear Knowledge Graph: {e}")
+            return 0
+    
+    async def ingest_project_to_graph(
+        self,
+        project: Project,
+    ) -> Dict[str, Any]:
+        """Ingest project code into the Knowledge Graph.
+        
+        Args:
+            project: Project instance
+            
+        Returns:
+            Dictionary with ingestion statistics
+        """
+        if not project.generated_path or not os.path.exists(project.generated_path):
+            return {
+                "success": False,
+                "error": "Project path does not exist"
+            }
+        
+        try:
+            stats = await ingestion_pipeline.ingest_project(
+                project_id=str(project.id),
+                project_name=project.name,
+                project_path=project.generated_path,
+                metadata={
+                    "description": project.description,
+                    "requirements": project.requirements,
+                }
+            )
+            stats["success"] = True
+            return stats
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
 
 
 # Module-level convenience instance

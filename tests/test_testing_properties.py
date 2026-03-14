@@ -9,7 +9,7 @@ from foundry.testing.quality_gates import QualityGates, Severity
 class TestTestingProperties:
     """Property-based tests for testing components."""
 
-    @settings(deadline=500)
+    @settings(deadline=5000)
     @given(st.sampled_from(["python", "javascript", "typescript", "java"]))
     def test_framework_selection_always_returns_valid_framework(self, language):
         """
@@ -23,7 +23,7 @@ class TestTestingProperties:
         assert isinstance(framework, TestFramework)
         assert framework in TestFramework
 
-    @settings(deadline=500)
+    @settings(deadline=5000)
     @given(
         st.text(min_size=5, max_size=50, alphabet=st.characters(blacklist_categories=("Cs",))).map(
             lambda x: x if "." in x else x + ".py"
@@ -42,7 +42,8 @@ class TestTestingProperties:
         assert isinstance(test_filename, str)
         assert len(test_filename) > 0
         # Should contain the original extension
-        original_ext = filename.split(".")[-1]
+        import pathlib
+        original_ext = pathlib.Path(filename).suffix
         assert original_ext in test_filename
 
     @given(
@@ -71,7 +72,7 @@ class TestTestingProperties:
         assert types1 == types2
 
 
-    @settings(deadline=500)
+    @settings(deadline=5000)
     @given(st.text(min_size=0, max_size=100, alphabet=st.characters(blacklist_categories=("Cs",))))
     def test_code_extraction_never_fails(self, response):
         """

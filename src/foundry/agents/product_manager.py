@@ -9,9 +9,9 @@ class ProductManagerAgent(Agent):
     Product Manager Agent responsible for requirements analysis and PRD generation.
     """
     
-    def __init__(self, model_name: str = "qwen2.5-coder:7b"):
+    def __init__(self, model_name: Optional[str] = None):
         super().__init__(AgentType.PRODUCT_MANAGER, model_name)
-        self.llm = LLMProviderFactory.create_provider(model_name=model_name)
+        self.llm = LLMProviderFactory.create_provider(model_name=self.model_name)
         
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         if message.message_type == MessageType.TASK:

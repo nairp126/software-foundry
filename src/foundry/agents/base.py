@@ -1,9 +1,11 @@
+from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field
 from enum import Enum
 import uuid
+from foundry.config import settings
 
 class AgentType(str, Enum):
     PRODUCT_MANAGER = "product_manager"
@@ -39,9 +41,9 @@ class AgentState(str, Enum):
 class Agent(ABC):
     """Base class for all specialized agents."""
     
-    def __init__(self, agent_type: AgentType, model_name: str = "qwen2.5-coder:7b"):
+    def __init__(self, agent_type: AgentType, model_name: Optional[str] = None):
         self.agent_type = agent_type
-        self.model_name = model_name
+        self.model_name = model_name or settings.ollama_model_name
         self.state = AgentState.IDLE
         self.memory: List[AgentMessage] = []
         

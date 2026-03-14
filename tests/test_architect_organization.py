@@ -6,6 +6,7 @@ import pytest
 import json
 from foundry.agents.architect import ArchitectAgent
 from foundry.agents.base import AgentType
+from foundry.config import settings
 
 
 @pytest.mark.asyncio
@@ -15,7 +16,7 @@ class TestArchitectOrganization:
     @pytest.fixture
     async def architect_agent(self):
         """Create an ArchitectAgent instance for testing."""
-        return ArchitectAgent(model_name="qwen2.5-coder:7b")
+        return ArchitectAgent(model_name=settings.ollama_model_name)
 
     @pytest.fixture
     def sample_architecture(self):
@@ -204,7 +205,7 @@ class TestArchitectIntegration:
     @pytest.fixture
     async def architect_agent(self):
         """Create an ArchitectAgent instance for testing."""
-        return ArchitectAgent(model_name="qwen2.5-coder:7b")
+        return ArchitectAgent(model_name=settings.ollama_model_name)
 
     async def test_end_to_end_design_generation(self, architect_agent):
         """Test complete design generation workflow."""

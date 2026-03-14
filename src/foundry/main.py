@@ -26,8 +26,9 @@ from sqlalchemy import select, func
 from foundry.config import settings
 from foundry.redis_client import redis_client
 from foundry.orchestrator import AgentOrchestrator
-from foundry.database import AsyncSessionLocal
+from foundry.database import AsyncSessionLocal, get_db
 from foundry.models.project import Project, ProjectStatus
+from sqlalchemy.ext.asyncio import AsyncSession
 from foundry.models.artifact import Artifact, ArtifactType
 from foundry.models.approval import ApprovalRequest, ApprovalStatus
 from foundry.models.api_key import APIKey
@@ -38,6 +39,7 @@ from foundry.middleware import (
     require_api_key,
 )
 from foundry.services.agent_control import agent_control_service
+from foundry.services.knowledge_graph import knowledge_graph_service
 from foundry.api.schemas import (
     ProjectCreateRequest,
     ProjectResponse,
@@ -68,9 +70,19 @@ orchestrator: Optional[AgentOrchestrator] = None
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
     await redis_client.connect()
+    
+    # Initialize Knowledge Graph
+    try:
+        await knowledge_graph_service.initialize()
+        print("Knowledge Graph initialized successfully")
+    except Exception as e:
+        print(f"Warning: Failed to initialize Knowledge Graph: {e}")
+        print("Application will continue without Knowledge Graph support")
+    
     global orchestrator
     orchestrator = AgentOrchestrator()
     yield
+    await knowledge_graph_service.disconnect()
     await redis_client.disconnect()
 
 
@@ -192,6 +204,7 @@ async def health() -> dict[str, str]:
 async def create_project(
     request: ProjectCreateRequest,
     background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
 ):
     """Create a new project and start generation in the background."""
     if not orchestrator:
@@ -204,20 +217,19 @@ async def create_project(
         status=ProjectStatus.created,
     )
 
-    async with AsyncSessionLocal() as session:
-        session.add(project)
-        await session.commit()
-        await session.refresh(project)
-        project_id = str(project.id)
-        response = ProjectResponse(
-            id=project.id,
-            name=project.name,
-            description=project.description,
-            requirements=project.requirements,
-            status=project.status.value,
-            created_at=project.created_at,
-            updated_at=project.updated_at,
-        )
+    db.add(project)
+    await db.commit()
+    await db.refresh(project)
+    project_id = str(project.id)
+    response = ProjectResponse(
+        id=project.id,
+        name=project.name,
+        description=project.description,
+        requirements=project.requirements,
+        status=project.status.value,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+    )
 
     background_tasks.add_task(_run_project_background, project_id, request.requirements)
     return response
@@ -227,315 +239,310 @@ async def create_project(
 async def list_projects(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
 ):
     """List all projects with pagination."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Project)
-            .order_by(Project.created_at.desc())
-            .offset(skip)
-            .limit(limit)
+    result = await db.execute(
+        select(Project)
+        .order_by(Project.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    projects = result.scalars().all()
+    return [
+        ProjectListItem(
+            id=p.id,
+            name=p.name,
+            status=p.status.value,
+            created_at=p.created_at,
         )
-        projects = result.scalars().all()
-        return [
-            ProjectListItem(
-                id=p.id,
-                name=p.name,
-                status=p.status.value,
-                created_at=p.created_at,
-            )
-            for p in projects
-        ]
+        for p in projects
+    ]
 
 
 @app.get("/projects/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: UUID):
+async def get_project(project_id: UUID, db: AsyncSession = Depends(get_db)):
     """Get full project details by ID."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Project).where(Project.id == project_id)
-        )
-        project = result.scalar_one_or_none()
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-        return ProjectResponse(
-            id=project.id,
-            name=project.name,
-            description=project.description,
-            requirements=project.requirements,
-            status=project.status.value,
-            prd=project.prd,
-            architecture=project.architecture,
-            code_review=project.code_review,
-            generated_path=project.generated_path,
-            created_at=project.created_at,
-            updated_at=project.updated_at,
-        )
+    result = await db.execute(
+        select(Project).where(Project.id == project_id)
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return ProjectResponse(
+        id=project.id,
+        name=project.name,
+        description=project.description,
+        requirements=project.requirements,
+        status=project.status.value,
+        prd=project.prd,
+        architecture=project.architecture,
+        code_review=project.code_review,
+        generated_path=project.generated_path,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+    )
 
 
 @app.get("/projects/{project_id}/artifacts", response_model=List[ArtifactResponse])
-async def get_project_artifacts(project_id: UUID):
+async def get_project_artifacts(project_id: UUID, db: AsyncSession = Depends(get_db)):
     """Get all generated artifacts for a project."""
-    async with AsyncSessionLocal() as session:
-        # Verify project exists
-        proj = await session.execute(
-            select(Project).where(Project.id == project_id)
-        )
-        if not proj.scalar_one_or_none():
-            raise HTTPException(status_code=404, detail="Project not found")
+    # Verify project exists
+    proj = await db.execute(
+        select(Project).where(Project.id == project_id)
+    )
+    if not proj.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Project not found")
 
-        result = await session.execute(
-            select(Artifact)
-            .where(Artifact.project_id == project_id)
-            .order_by(Artifact.created_at)
+    result = await db.execute(
+        select(Artifact)
+        .where(Artifact.project_id == project_id)
+        .order_by(Artifact.created_at)
+    )
+    artifacts = result.scalars().all()
+    return [
+        ArtifactResponse(
+            id=a.id,
+            filename=a.filename,
+            artifact_type=a.artifact_type.value,
+            content=a.content,
+            created_at=a.created_at,
         )
-        artifacts = result.scalars().all()
-        return [
-            ArtifactResponse(
-                id=a.id,
-                filename=a.filename,
-                artifact_type=a.artifact_type.value,
-                content=a.content,
-                created_at=a.created_at,
-            )
-            for a in artifacts
-        ]
+        for a in artifacts
+    ]
 
 
 @app.delete("/projects/{project_id}", status_code=204)
-async def delete_project(project_id: UUID):
+async def delete_project(project_id: UUID, db: AsyncSession = Depends(get_db)):
     """Delete a project and all its artifacts."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Project).where(Project.id == project_id)
-        )
-        project = result.scalar_one_or_none()
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-        await session.delete(project)
-        await session.commit()
+    result = await db.execute(
+        select(Project).where(Project.id == project_id)
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    await db.delete(project)
+    await db.commit()
 
 
 # ---- Approval Workflow ---- #
 
 @app.get("/projects/{project_id}/approval", response_model=Optional[ApprovalResponse])
-async def get_approval_status(project_id: UUID):
+async def get_approval_status(project_id: UUID, db: AsyncSession = Depends(get_db)):
     """Get the latest approval request for a project."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ApprovalRequest)
-            .where(ApprovalRequest.project_id == project_id)
-            .order_by(ApprovalRequest.created_at.desc())
-            .limit(1)
-        )
-        approval = result.scalar_one_or_none()
-        if not approval:
-            return None
-        return ApprovalResponse(
-            id=approval.id,
-            project_id=approval.project_id,
-            stage=approval.stage,
-            status=approval.status.value,
-            reviewer_comment=approval.reviewer_comment,
-            created_at=approval.created_at,
-        )
+    result = await db.execute(
+        select(ApprovalRequest)
+        .where(ApprovalRequest.project_id == project_id)
+        .order_by(ApprovalRequest.created_at.desc())
+        .limit(1)
+    )
+    approval = result.scalar_one_or_none()
+    if not approval:
+        return None
+    return ApprovalResponse(
+        id=approval.id,
+        project_id=approval.project_id,
+        stage=approval.stage,
+        status=approval.status.value,
+        reviewer_comment=approval.reviewer_comment,
+        created_at=approval.created_at,
+    )
 
 
 @app.post("/projects/{project_id}/approve", response_model=ApprovalResponse)
-async def approve_project(project_id: UUID, decision: ApprovalDecision):
+async def approve_project(project_id: UUID, decision: ApprovalDecision, db: AsyncSession = Depends(get_db)):
     """Approve the pending gate for a project."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ApprovalRequest)
-            .where(
-                ApprovalRequest.project_id == project_id,
-                ApprovalRequest.status == ApprovalStatus.pending,
-            )
-            .order_by(ApprovalRequest.created_at.desc())
-            .limit(1)
+    result = await db.execute(
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.project_id == project_id,
+            ApprovalRequest.status == ApprovalStatus.pending,
         )
-        approval = result.scalar_one_or_none()
-        if not approval:
-            raise HTTPException(status_code=404, detail="No pending approval found")
+        .order_by(ApprovalRequest.created_at.desc())
+        .limit(1)
+    )
+    approval = result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(status_code=404, detail="No pending approval found")
 
-        approval.status = ApprovalStatus.approved
-        approval.reviewer_comment = decision.comment
-        await session.commit()
-        await session.refresh(approval)
+    approval.status = ApprovalStatus.approved
+    approval.reviewer_comment = decision.comment
+    await db.commit()
+    await db.refresh(approval)
 
-        return ApprovalResponse(
-            id=approval.id,
-            project_id=approval.project_id,
-            stage=approval.stage,
-            status=approval.status.value,
-            reviewer_comment=approval.reviewer_comment,
-            created_at=approval.created_at,
-        )
+    return ApprovalResponse(
+        id=approval.id,
+        project_id=approval.project_id,
+        stage=approval.stage,
+        status=approval.status.value,
+        reviewer_comment=approval.reviewer_comment,
+        created_at=approval.created_at,
+    )
 
 
 @app.post("/projects/{project_id}/reject", response_model=ApprovalResponse)
-async def reject_project(project_id: UUID, decision: ApprovalDecision):
+async def reject_project(project_id: UUID, decision: ApprovalDecision, db: AsyncSession = Depends(get_db)):
     """Reject the pending gate for a project."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ApprovalRequest)
-            .where(
-                ApprovalRequest.project_id == project_id,
-                ApprovalRequest.status == ApprovalStatus.pending,
-            )
-            .order_by(ApprovalRequest.created_at.desc())
-            .limit(1)
+    result = await db.execute(
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.project_id == project_id,
+            ApprovalRequest.status == ApprovalStatus.pending,
         )
-        approval = result.scalar_one_or_none()
-        if not approval:
-            raise HTTPException(status_code=404, detail="No pending approval found")
+        .order_by(ApprovalRequest.created_at.desc())
+        .limit(1)
+    )
+    approval = result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(status_code=404, detail="No pending approval found")
 
-        approval.status = ApprovalStatus.rejected
-        approval.reviewer_comment = decision.comment
-        await session.commit()
-        await session.refresh(approval)
+    approval.status = ApprovalStatus.rejected
+    approval.reviewer_comment = decision.comment
+    await db.commit()
+    await db.refresh(approval)
 
-        # Also mark the project as FAILED
-        proj_result = await session.execute(
-            select(Project).where(Project.id == project_id)
-        )
-        project = proj_result.scalar_one_or_none()
-        if project:
-            project.status = ProjectStatus.failed
-            await session.commit()
+    # Also mark the project as FAILED
+    proj_result = await db.execute(
+        select(Project).where(Project.id == project_id)
+    )
+    project = proj_result.scalar_one_or_none()
+    if project:
+        project.status = ProjectStatus.failed
+        await db.commit()
 
-        return ApprovalResponse(
-            id=approval.id,
-            project_id=approval.project_id,
-            stage=approval.stage,
-            status=approval.status.value,
-            reviewer_comment=approval.reviewer_comment,
-            created_at=approval.created_at,
-        )
+    return ApprovalResponse(
+        id=approval.id,
+        project_id=approval.project_id,
+        stage=approval.stage,
+        status=approval.status.value,
+        reviewer_comment=approval.reviewer_comment,
+        created_at=approval.created_at,
+    )
 
 
 # ---- Agent Orchestration ---- #
 
 @app.get("/projects/{project_id}/agent/status", response_model=AgentStatusResponse)
-async def get_agent_status(project_id: UUID):
+async def get_agent_status(project_id: UUID, db: AsyncSession = Depends(get_db)):
     """Get current agent execution status for a project."""
-    async with AsyncSessionLocal() as session:
-        # Verify project exists
-        result = await session.execute(
-            select(Project).where(Project.id == project_id)
-        )
-        project = result.scalar_one_or_none()
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-        
-        # Check control status
-        control_status = await agent_control_service.check_control_status(project_id)
-        is_paused = control_status and control_status.get("action") == "pause"
-        
-        # Check checkpoint availability
-        checkpoint = await agent_control_service.get_checkpoint(project_id)
-        
-        return AgentStatusResponse(
-            project_id=project_id,
-            status=project.status.value,
-            current_agent=_get_current_agent_from_status(project.status),
-            progress=None,  # TODO: Implement progress tracking
-            is_paused=is_paused,
-            checkpoint_available=checkpoint is not None,
-        )
+    # Verify project exists
+    result = await db.execute(
+        select(Project).where(Project.id == project_id)
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Check control status
+    control_status = await agent_control_service.check_control_status(project_id)
+    is_paused = bool(control_status and control_status.get("action") == "pause")
+    
+    # Check checkpoint availability
+    checkpoint = await agent_control_service.get_checkpoint(project_id)
+    
+    return AgentStatusResponse(
+        project_id=project_id,
+        status=project.status.value,
+        current_agent=_get_current_agent_from_status(project.status),
+        progress=None,  # TODO: Implement progress tracking
+        is_paused=is_paused,
+        checkpoint_available=checkpoint is not None,
+    )
 
 
 @app.post("/projects/{project_id}/agent/pause", response_model=AgentControlResponse)
 async def pause_agent_execution(
     project_id: UUID,
     request: AgentControlRequest,
+    db: AsyncSession = Depends(get_db),
 ):
     """Pause agent execution for a project."""
-    async with AsyncSessionLocal() as session:
-        # Verify project exists
-        result = await session.execute(
-            select(Project).where(Project.id == project_id)
-        )
-        project = result.scalar_one_or_none()
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-        
-        # Check if already paused
-        if project.status == ProjectStatus.paused:
-            raise HTTPException(status_code=400, detail="Project is already paused")
-        
-        # Pause execution
-        result = await agent_control_service.pause_execution(
-            project_id,
-            reason=request.reason or "User requested pause",
-        )
-        
-        # Update project status
-        project.status = ProjectStatus.paused
-        await session.commit()
-        
-        return AgentControlResponse(**result)
+    # Verify project exists
+    result = await db.execute(
+        select(Project).where(Project.id == project_id)
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Check if already paused
+    if project.status == ProjectStatus.paused:
+        raise HTTPException(status_code=400, detail="Project is already paused")
+    
+    # Pause execution
+    pause_result = await agent_control_service.pause_execution(
+        project_id,
+        reason=request.reason or "User requested pause",
+    )
+    
+    # Update project status
+    project.status = ProjectStatus.paused
+    await db.commit()
+    
+    return AgentControlResponse(**pause_result)
 
 
 @app.post("/projects/{project_id}/agent/resume", response_model=AgentControlResponse)
-async def resume_agent_execution(project_id: UUID):
+async def resume_agent_execution(project_id: UUID, db: AsyncSession = Depends(get_db)):
     """Resume agent execution for a project."""
-    async with AsyncSessionLocal() as session:
-        # Verify project exists
-        result = await session.execute(
-            select(Project).where(Project.id == project_id)
-        )
-        project = result.scalar_one_or_none()
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-        
-        # Check if paused
-        if project.status != ProjectStatus.paused:
-            raise HTTPException(status_code=400, detail="Project is not paused")
-        
-        # Resume execution
-        result = await agent_control_service.resume_execution(project_id)
-        
-        # Update project status (restore to appropriate running state)
-        # TODO: Restore to the correct running state from checkpoint
-        project.status = ProjectStatus.created
-        await session.commit()
-        
-        return AgentControlResponse(**result)
+    # Verify project exists
+    result = await db.execute(
+        select(Project).where(Project.id == project_id)
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Check if paused
+    if project.status != ProjectStatus.paused:
+        raise HTTPException(status_code=400, detail="Project is not paused")
+    
+    # Resume execution
+    resume_result = await agent_control_service.resume_execution(project_id)
+    
+    # Update project status (restore to appropriate running state)
+    # TODO: Restore to the correct running state from checkpoint
+    project.status = ProjectStatus.created
+    await db.commit()
+    
+    return AgentControlResponse(**resume_result)
 
 
 @app.post("/projects/{project_id}/agent/cancel", response_model=AgentControlResponse)
 async def cancel_agent_execution(
     project_id: UUID,
     request: AgentControlRequest,
+    db: AsyncSession = Depends(get_db),
 ):
     """Cancel agent execution and optionally rollback."""
-    async with AsyncSessionLocal() as session:
-        # Verify project exists
-        result = await session.execute(
-            select(Project).where(Project.id == project_id)
-        )
-        project = result.scalar_one_or_none()
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-        
-        # Cancel execution
-        result = await agent_control_service.cancel_execution(
-            project_id,
-            rollback=request.rollback if request.rollback is not None else True,
-        )
-        
-        # Update project status
-        project.status = ProjectStatus.failed
-        await session.commit()
-        
-        return AgentControlResponse(**result)
+    # Verify project exists
+    result = await db.execute(
+        select(Project).where(Project.id == project_id)
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Cancel execution
+    cancel_result = await agent_control_service.cancel_execution(
+        project_id,
+        rollback=request.rollback if request.rollback is not None else True,
+    )
+    
+    # Update project status
+    project.status = ProjectStatus.failed
+    await db.commit()
+    
+    return AgentControlResponse(**cancel_result)
 
 
 # ---- API Key Management ---- #
 
 @app.post("/api-keys", response_model=APIKeyCreateResponse, status_code=201)
-async def create_api_key(request: APIKeyCreateRequest):
+async def create_api_key(
+    request: APIKeyCreateRequest,
+    db: AsyncSession = Depends(get_db)
+):
     """Create a new API key.
     
     Note: The actual key is only returned once during creation.
@@ -560,84 +567,87 @@ async def create_api_key(request: APIKeyCreateRequest):
         rate_limit_per_minute=request.rate_limit_per_minute or 60,
     )
     
-    async with AsyncSessionLocal() as session:
-        session.add(api_key)
-        await session.commit()
-        await session.refresh(api_key)
-        
-        return APIKeyCreateResponse(
-            id=api_key.id,
-            name=api_key.name,
-            key=key,  # Only time the actual key is returned
-            key_prefix=api_key.key_prefix,
-            expires_at=api_key.expires_at,
-            rate_limit_per_minute=api_key.rate_limit_per_minute,
-            created_at=api_key.created_at,
-        )
+    db.add(api_key)
+    await db.commit()
+    await db.refresh(api_key)
+    
+    return APIKeyCreateResponse(
+        id=api_key.id,
+        name=api_key.name,
+        key=key,  # Only time the actual key is returned
+        key_prefix=api_key.key_prefix,
+        expires_at=api_key.expires_at,
+        rate_limit_per_minute=api_key.rate_limit_per_minute,
+        created_at=api_key.created_at,
+    )
 
 
 @app.get("/api-keys", response_model=List[APIKeyResponse])
 async def list_api_keys(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db)
 ):
     """List all API keys (without the actual key values)."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(APIKey)
-            .order_by(APIKey.created_at.desc())
-            .offset(skip)
-            .limit(limit)
+    result = await db.execute(
+        select(APIKey)
+        .order_by(APIKey.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    api_keys = result.scalars().all()
+    return [
+        APIKeyResponse(
+            id=k.id,
+            name=k.name,
+            key_prefix=k.key_prefix,
+            is_active=k.is_active,
+            expires_at=k.expires_at,
+            last_used_at=k.last_used_at,
+            rate_limit_per_minute=k.rate_limit_per_minute,
+            created_at=k.created_at,
         )
-        api_keys = result.scalars().all()
-        return [
-            APIKeyResponse(
-                id=k.id,
-                name=k.name,
-                key_prefix=k.key_prefix,
-                is_active=k.is_active,
-                expires_at=k.expires_at,
-                last_used_at=k.last_used_at,
-                rate_limit_per_minute=k.rate_limit_per_minute,
-                created_at=k.created_at,
-            )
-            for k in api_keys
-        ]
+        for k in api_keys
+    ]
 
 
 @app.delete("/api-keys/{key_id}", status_code=204)
-async def delete_api_key(key_id: UUID):
+async def delete_api_key(
+    key_id: UUID,
+    db: AsyncSession = Depends(get_db)
+):
     """Delete an API key."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(APIKey).where(APIKey.id == key_id)
-        )
-        api_key = result.scalar_one_or_none()
-        if not api_key:
-            raise HTTPException(status_code=404, detail="API key not found")
-        await session.delete(api_key)
-        await session.commit()
+    result = await db.execute(
+        select(APIKey).where(APIKey.id == key_id)
+    )
+    api_key = result.scalar_one_or_none()
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API key not found")
+    await db.delete(api_key)
+    await db.commit()
 
 
 @app.patch("/api-keys/{key_id}/deactivate", response_model=APIKeyResponse)
-async def deactivate_api_key(key_id: UUID):
+async def deactivate_api_key(
+    key_id: UUID,
+    db: AsyncSession = Depends(get_db)
+):
     """Deactivate an API key without deleting it."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(APIKey).where(APIKey.id == key_id)
-        )
-        api_key = result.scalar_one_or_none()
-        if not api_key:
-            raise HTTPException(status_code=404, detail="API key not found")
-        
-        api_key.is_active = False
-        await session.commit()
-        await session.refresh(api_key)
-        
-        return APIKeyResponse(
-            id=api_key.id,
-            name=api_key.name,
-            key_prefix=api_key.key_prefix,
+    result = await db.execute(
+        select(APIKey).where(APIKey.id == key_id)
+    )
+    api_key = result.scalar_one_or_none()
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API key not found")
+    
+    api_key.is_active = False
+    await db.commit()
+    await db.refresh(api_key)
+    
+    return APIKeyResponse(
+        id=api_key.id,
+        name=api_key.name,
+        key_prefix=api_key.key_prefix,
             is_active=api_key.is_active,
             expires_at=api_key.expires_at,
             last_used_at=api_key.last_used_at,
@@ -695,4 +705,3 @@ async def project_websocket(websocket: WebSocket, project_id: UUID):
         _ws_connections[key].discard(websocket)
         if not _ws_connections[key]:
             del _ws_connections[key]
-

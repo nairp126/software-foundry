@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 from foundry.llm.base import BaseLLMProvider, LLMMessage
 from foundry.llm.factory import LLMProviderFactory
+from foundry.config import settings
 
 
 class TestFramework(Enum):
@@ -43,8 +44,9 @@ class TestGenerator:
 
     COVERAGE_THRESHOLD = 80.0
 
-    def __init__(self, model_name: str = "qwen2.5-coder:7b"):
+    def __init__(self, model_name: Optional[str] = None):
         """Initialize test generator with LLM provider."""
+        model_name = model_name or settings.ollama_model_name
         self.llm: BaseLLMProvider = LLMProviderFactory.create_provider("ollama", model_name)
 
     def select_framework(self, language: str, tech_stack: Optional[Dict] = None) -> TestFramework:

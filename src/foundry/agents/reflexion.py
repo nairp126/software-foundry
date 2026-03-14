@@ -22,6 +22,7 @@ from foundry.sandbox.error_analysis import (
     ErrorAnalysis,
     CodeFix,
 )
+from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +41,13 @@ class ReflexionEngine(Agent):
     
     MAX_RETRY_ATTEMPTS = 5  # As per Requirement 5.5
     
-    def __init__(self, model_name: str = "qwen2.5-coder:7b"):
+    def __init__(self, model_name: Optional[str] = None):
         super().__init__(AgentType.REFLEXION, model_name=model_name)
         self.llm = LLMProviderFactory.create_provider(model_name=self.model_name)
         self.sandbox_env = SandboxEnvironment()
         self.error_analyzer = ErrorAnalyzer()
         self.fix_generator = FixGenerator()
+        self.kg_tools = KnowledgeGraphTools()  # Knowledge Graph integration
         
     async def process_message(self, message: AgentMessage) -> AgentMessage:
         """Process incoming messages."""
@@ -130,6 +132,77 @@ class ReflexionEngine(Agent):
         )
         
         return analysis
+    
+    async def analyze_impact_with_kg(
+        self,
+        project_id: str,
+        component_name: str,
+        error_analysis: ErrorAnalysis
+    ) -> Dict[str, Any]:
+        """
+        Analyze the impact of an error using the Knowledge Graph.
+        
+        This provides "blast radius" analysis - what other components
+        might be affected by this error or its fix.
+        
+        Args:
+            project_id: Project identifier
+            component_name: Name of the component with the error
+            error_analysis: Error analysis results
+            
+        Returns:
+            Impact analysis with affected components
+        """
+        logger.info(f"Analyzing impact for {component_name} using Knowledge Graph")
+        
+        try:
+            await self.kg_tools.connect()
+            
+            # Get impact analysis from knowledge graph
+            impact = await self.kg_tools.analyze_change_impact(
+                project_id=project_id,
+                component_name=component_name,
+                max_depth=3
+            )
+            
+            # Get callers of this component
+            callers = await self.kg_tools.find_callers(
+                project_id=project_id,
+                function_name=component_name
+            )
+            
+            # Get dependencies
+            dependencies = await self.kg_tools.find_function_dependencies(
+                project_id=project_id,
+                function_name=component_name,
+                max_depth=2
+            )
+            
+            logger.info(
+                f"Impact analysis: {len(impact.get('affected_components', []))} affected, "
+                f"{len(callers)} callers, {len(dependencies)} dependencies"
+            )
+            
+            return {
+                "component": component_name,
+                "error_type": error_analysis.error_type,
+                "impact": impact,
+                "callers": callers,
+                "dependencies": dependencies,
+                "blast_radius": len(impact.get("affected_components", [])),
+                "risk_level": "high" if len(callers) > 5 else "medium" if len(callers) > 0 else "low"
+            }
+            
+        except Exception as e:
+            logger.warning(f"Knowledge Graph impact analysis failed: {e}")
+            return {
+                "component": component_name,
+                "error": str(e),
+                "blast_radius": 0,
+                "risk_level": "unknown"
+            }
+        finally:
+            await self.kg_tools.disconnect()
     
     async def generate_fixes(self, analysis: ErrorAnalysis, code_content: str) -> List[CodeFix]:
         """

@@ -1,11 +1,11 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.base import LLMMessage
 from foundry.llm.factory import LLMProviderFactory
 
 class CodeReviewAgent(Agent):
-    def __init__(self):
-        super().__init__(AgentType.CODE_REVIEW)
+    def __init__(self, model_name: Optional[str] = None):
+        super().__init__(AgentType.CODE_REVIEW, model_name)
         self.llm = LLMProviderFactory.create_provider(model_name=self.model_name)
 
     async def process_message(self, message: AgentMessage) -> AgentMessage:

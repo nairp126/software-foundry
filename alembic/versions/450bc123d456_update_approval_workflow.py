@@ -30,7 +30,7 @@ def upgrade() -> None:
     op.drop_column('approval_requests', 'reviewer_comment')
     
     # Add new columns to approval_requests
-    op.add_column('approval_requests', sa.Column('request_type', sa.Enum('plan', 'deployment', 'cost_override', 'security_review', 'component', name='approval_type'), nullable=False, server_default='plan'))
+    op.add_column('approval_requests', sa.Column('request_type', sa.Enum('plan', 'deployment', 'cost_override', 'security_review', 'component', name='approval_type', create_type=False), nullable=False, server_default='plan'))
     op.add_column('approval_requests', sa.Column('estimated_cost', sa.Float(), nullable=True))
     op.add_column('approval_requests', sa.Column('timeout_at', sa.DateTime(), nullable=True))
     op.add_column('approval_requests', sa.Column('responded_at', sa.DateTime(), nullable=True))
@@ -43,7 +43,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_approval_requests_status'), 'approval_requests', ['status'], unique=False)
     
     # Add approval_policy to projects table
-    op.add_column('projects', sa.Column('approval_policy', sa.Enum('autonomous', 'standard', 'strict', name='approval_policy'), nullable=False, server_default='standard'))
+    op.add_column('projects', sa.Column('approval_policy', sa.Enum('autonomous', 'standard', 'strict', name='approval_policy', create_type=False), nullable=False, server_default='standard'))
     
     # Add paused status to project_status enum
     op.execute("ALTER TYPE project_status ADD VALUE 'paused'")

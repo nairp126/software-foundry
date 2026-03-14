@@ -2,52 +2,44 @@
 
 from typing import Callable
 from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Add security headers to all responses."""
+class SecurityHeadersMiddleware:
+    """Add security headers to all responses using pure ASGI to avoid loop issues."""
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """Add security headers to response.
-        
-        Args:
-            request: Incoming request
-            call_next: Next middleware/handler
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                
+                # Helper to add/update headers
+                new_headers = [
+                    (b"Strict-Transport-Security", b"max-age=31536000; includeSubDomains"),
+                    (b"Content-Security-Policy", 
+                     b"default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+                     b"style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+                     b"font-src 'self' data:; connect-src 'self' ws: wss:;"),
+                    (b"X-Frame-Options", b"DENY"),
+                    (b"X-Content-Type-Options", b"nosniff"),
+                    (b"X-XSS-Protection", b"1; mode=block"),
+                    (b"Referrer-Policy", b"strict-origin-when-cross-origin"),
+                    (b"Permissions-Policy", b"geolocation=(), microphone=(), camera=()"),
+                ]
+                
+                # Convert to bytes if they aren't already
+                for key, value in new_headers:
+                    headers.append((key, value))
+                
+                message["headers"] = headers
             
-        Returns:
-            Response with security headers
-        """
-        response = await call_next(request)
-        
-        # Strict Transport Security (HSTS)
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        
-        # Content Security Policy
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: https:; "
-            "font-src 'self' data:; "
-            "connect-src 'self' ws: wss:;"
-        )
-        
-        # X-Frame-Options
-        response.headers["X-Frame-Options"] = "DENY"
-        
-        # X-Content-Type-Options
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        
-        # X-XSS-Protection
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        
-        # Referrer Policy
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        
-        # Permissions Policy
-        response.headers["Permissions-Policy"] = (
-            "geolocation=(), microphone=(), camera=()"
-        )
-        
-        return response
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
