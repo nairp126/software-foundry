@@ -15,7 +15,8 @@ class ProductManagerAgent(Agent):
         
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         if message.message_type == MessageType.TASK:
-            return await self.analyze_requirements(message.payload.get("content", ""))
+            content = message.payload.get("prompt") or message.payload.get("content", "")
+            return await self.analyze_requirements(content)
         return None
 
     async def analyze_requirements(self, requirements: str) -> AgentMessage:

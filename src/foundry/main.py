@@ -175,7 +175,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 async def _run_project_background(project_id: str, requirements: str) -> None:
     """Background task that drives the orchestrator pipeline."""
     try:
-        await orchestrator.run_project(requirements, project_id=project_id)
+        await orchestrator.run(project_id=str(project_id), initial_prompt=requirements)
     except Exception as exc:
         print(f"[ERROR] Project {project_id} failed: {exc}")
 

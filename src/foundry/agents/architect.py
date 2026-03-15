@@ -38,12 +38,27 @@ class ArchitectAgent(Agent):
         system_prompt = """You are an expert System Architect.
         Your goal is to design a robust, scalable system architecture based on the provided Product Requirements Document (PRD).
 
+        ABSOLUTE SYSTEM REQUIREMENT: You are a PYTHON-ONLY ARCHITECT. 
+        YOU ARE PROHIBITED FROM SUGGESTING ANY NON-PYTHON TECHNOLOGIES.
+
+        MANDATORY TECH STACK (ONLY USE THESE):
+        - Backend: FastAPI, Flask, or Django (Python 3.11+)
+        - Web Server: Uvicorn or Gunicorn
+        - Database: PostgreSQL, Redis, or DynamoDB (using Python clients like boto3 or psycopg2)
+        - UI/Frontend: If UI is needed, suggest Jinja2 templates, HTMX, or server-side rendering logic in Python.
+
+        STRICTLY PROHIBITED (DO NOT USE):
+        - NO Node.js, NO Express.
+        - NO React, NO Vue, NO Angular.
+        - NO NPM, NO Yarn.
+        - NO JavaScript or TypeScript libraries.
+
         The Architecture Design should include:
         1. High-Level Architecture (Monolith vs Microservices, Client/Server)
-        2. Technology Stack Selection (Frontend, Backend, Database, etc.)
+        2. Technology Stack Selection (Must be strictly Python-based)
         3. Database Schema Design (Entities and Relationships)
         4. API Interface Definition (Endpoints)
-        5. File Structure
+        5. File Structure (Must use strictly .py extensions)
 
         Return the result as a JSON object.
         """
@@ -56,13 +71,43 @@ class ArchitectAgent(Agent):
         ]
 
         response = await self.llm.generate(messages, temperature=0.7)
+        architecture_content = response.content
+
+        # POST-PROCESSING: Self-Correction Loop for Python enforcement
+        if self._is_non_python_stack(architecture_content):
+            print("CRITICAL: Non-Python architecture detected. Triggering Architect Self-Correction...")
+            architecture_content = await self._self_correct_architecture(architecture_content, prd_content)
 
         return AgentMessage(
             sender=self.agent_type,
             recipient=AgentType.ENGINEER,
             message_type=MessageType.TASK,
-            payload={"architecture": response.content, "prd": prd_content}
+            payload={"architecture": architecture_content, "prd": prd_content}
         )
+
+    def _is_non_python_stack(self, content: str) -> bool:
+        """Checks if the architecture contains forbidden technologies."""
+        forbidden = ["node.js", "express.js", "react.js", "npm ", "yarn ", "mongodb", "next.js", "typescript"]
+        lower_content = content.lower()
+        return any(f in lower_content for f in forbidden)
+
+    async def _self_correct_architecture(self, dirty_arch: str, prd: str) -> str:
+        """Forces the Architect to rewrite the design using Python."""
+        system_prompt = """CRITICAL ERROR: You suggested a non-Python tech stack (Node/React/JS). 
+        You MUST rewrite this design to be 100% PYTHON-BASED.
+        - Use FastAPI or Flask for Backend.
+        - Use PostgreSQL or Redis for Database.
+        - Use Jinja2/HTMX for UI (if needed).
+        - Use strictly .py extensions.
+        - ABSOLUTELY NO JavaScript, Node, or React.
+        """
+        user_prompt = f"Original PRD:\n{prd}\n\nInvalid Non-Python Design to fix:\n{dirty_arch}"
+        messages = [
+            LLMMessage(role="system", content=system_prompt),
+            LLMMessage(role="user", content=user_prompt)
+        ]
+        response = await self.llm.generate(messages, temperature=0.2)
+        return response.content
 
     async def organize_file_structure(self, architecture: Dict[str, Any], tech_stack: Dict[str, str]) -> Dict[str, Any]:
         """
@@ -319,6 +364,8 @@ Context:
         # Parse architecture if it's a string
         if isinstance(architecture, str):
             try:
+                # CLEANING: Strip markdown backticks
+                architecture = architecture.replace("```json", "").replace("```", "").strip()
                 architecture = json.loads(architecture)
             except json.JSONDecodeError:
                 architecture = {"raw": architecture}

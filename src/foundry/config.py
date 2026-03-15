@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     environment: str = Field(default="development")
     debug: bool = Field(default=False)
     log_level: str = Field(default="INFO")
+    generated_projects_path: str = Field(default="generated_projects")
 
     # API
     api_host: str = Field(default="0.0.0.0")

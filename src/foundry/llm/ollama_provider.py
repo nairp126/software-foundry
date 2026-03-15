@@ -1,5 +1,7 @@
 """Ollama provider for local Qwen models."""
 
+import asyncio
+import enum
 from typing import Optional, List, Any, AsyncIterator
 import httpx
 from foundry.llm.base import BaseLLMProvider, LLMMessage, LLMResponse
@@ -9,6 +11,9 @@ from foundry.config import settings
 class OllamaProvider(BaseLLMProvider):
     """Ollama provider for local model inference."""
     
+    # Global semaphore to prevent resource contention on local Ollama
+    _semaphore = asyncio.Semaphore(1)
+   
     def __init__(
         self,
         model_name: Optional[str] = None,
@@ -29,7 +34,7 @@ class OllamaProvider(BaseLLMProvider):
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
         # Use separate timeouts: fast connection, longer read
         # Increased to 300.0 for very long generations
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(1200.0, connect=10.0))
     
     async def _check_connection(self):
         """Verify connection to Ollama server."""
@@ -80,6 +85,9 @@ class OllamaProvider(BaseLLMProvider):
             "stream": False,
             "options": {
                 "temperature": temperature,
+                "num_ctx": 4096,  # Reduced for speed on local hardware
+                "num_thread": 4,  # More stable default
+                "num_predict": 2048, # Prevent runaway generation
             }
         }
         
@@ -96,10 +104,13 @@ class OllamaProvider(BaseLLMProvider):
             print(f"Error: {e}")
             raise
 
-        response = await self.client.post(
-            f"{self.base_url}/api/chat",
-            json=payload,
-        )
+        async with self._semaphore:
+            print(f"DEBUG: LLM Request starting (Payload: {len(str(payload))} chars)")
+            response = await self.client.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                timeout=httpx.Timeout(1200.0, read=1200.0) # Explicit read timeout
+            )
         if response.status_code == 404:
              raise ConnectionError(f"Model '{self.model_name}' not found in Ollama. Please run 'ollama pull {self.model_name}'")
         response.raise_for_status()
@@ -168,6 +179,7 @@ class OllamaProvider(BaseLLMProvider):
             "POST",
             f"{self.base_url}/api/chat",
             json=payload,
+            timeout=1200.0
         ) as response:
             response.raise_for_status()
             

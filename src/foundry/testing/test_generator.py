@@ -15,10 +15,6 @@ class TestFramework(Enum):
     """Supported test frameworks by language."""
 
     PYTEST = "pytest"
-    JEST = "jest"
-    VITEST = "vitest"
-    JUNIT = "junit"
-    MOCHA = "mocha"
 
 
 @dataclass
@@ -36,10 +32,7 @@ class TestGenerator:
     """Generates automated tests for code with coverage analysis."""
 
     FRAMEWORK_MAP = {
-        "python": TestFramework.PYTEST,
-        "javascript": TestFramework.JEST,
-        "typescript": TestFramework.JEST,
-        "java": TestFramework.JUNIT,
+        "python": TestFramework.PYTEST
     }
 
     COVERAGE_THRESHOLD = 80.0
@@ -133,27 +126,6 @@ Framework-specific guidelines:
 - Use pytest.mark for test categorization
 - Use pytest.raises for exception testing
 - Follow pytest naming conventions (test_*.py)
-""",
-            TestFramework.JEST: """
-Framework-specific guidelines:
-- Use describe/it blocks for test organization
-- Use beforeEach/afterEach for setup/teardown
-- Use jest.mock() for mocking
-- Follow Jest naming conventions (*.test.js or *.test.ts)
-""",
-            TestFramework.VITEST: """
-Framework-specific guidelines:
-- Use describe/it blocks for test organization
-- Use beforeEach/afterEach for setup/teardown
-- Use vi.mock() for mocking
-- Follow Vitest naming conventions (*.test.ts)
-""",
-            TestFramework.JUNIT: """
-Framework-specific guidelines:
-- Use @Test annotations
-- Use @BeforeEach/@AfterEach for setup/teardown
-- Use Mockito for mocking
-- Follow JUnit 5 conventions
 """,
         }
         return instructions.get(framework, "")

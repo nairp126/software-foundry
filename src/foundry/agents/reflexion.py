@@ -47,7 +47,14 @@ class ReflexionEngine(Agent):
         self.sandbox_env = SandboxEnvironment()
         self.error_analyzer = ErrorAnalyzer()
         self.fix_generator = FixGenerator()
-        self.kg_tools = KnowledgeGraphTools()  # Knowledge Graph integration
+        self.quality_gates = QualityGates() # Added QualityGates initialization
+        
+        # Knowledge Graph integration
+        try:
+            from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
+            self.kg_tools = KnowledgeGraphTools()
+        except ImportError:
+            self.kg_tools = None
         
     async def process_message(self, message: AgentMessage) -> AgentMessage:
         """Process incoming messages."""
@@ -57,10 +64,12 @@ class ReflexionEngine(Agent):
             if task_type == "execute_and_fix":
                 # Execute code and automatically fix errors
                 return await self.execute_and_fix(
-                    code_content=message.payload.get("code"),
+                    code_repo=message.payload.get("code_repo") or message.payload.get("code"),
                     language=message.payload.get("language", "python"),
-                    filename=message.payload.get("filename", "main.py"),
-                    dependencies=message.payload.get("dependencies", [])
+                    entry_point=message.payload.get("entry_point", "main.py"),
+                    dependencies=message.payload.get("dependencies", []),
+                    feedback=message.payload.get("feedback"),
+                    project_id=message.payload.get("project_id", "current")
                 )
             elif task_type == "reflect_on_feedback":
                 # Legacy: Handle code review feedback
@@ -72,30 +81,30 @@ class ReflexionEngine(Agent):
     
     async def execute_code(
         self,
-        code: Code,
-        environment: SandboxEnvironment
+        code_repo: Dict[str, str],
+        environment: SandboxEnvironment,
+        language: str = "python",
+        entry_point: str = "main.py",
+        dependencies: Optional[List[str]] = None
     ) -> ExecutionResult:
         """
         Execute code in a sandboxed environment.
-        
-        Args:
-            code: Code to execute
-            environment: Sandbox environment
-            
-        Returns:
-            ExecutionResult with execution details
         """
-        logger.info(f"Executing code in sandbox: {code.filename}")
+        logger.info(f"Executing project in sandbox. Entry point: {entry_point}")
         
         # Create sandbox
         sandbox = await environment.create_sandbox(
-            language=code.language,
-            dependencies=[]
+            language=language,
+            dependencies=dependencies or []
         )
         
         try:
             # Execute code
-            result = await environment.execute_code(sandbox, code)
+            result = await environment.execute_code(
+                sandbox, 
+                code_repo=code_repo,
+                entry_point=entry_point
+            )
             logger.info(
                 f"Execution completed: success={result.success}, "
                 f"exit_code={result.exit_code}, time={result.execution_time:.2f}s"
@@ -344,43 +353,41 @@ class ReflexionEngine(Agent):
             return True
         
         return False
-    
     async def execute_and_fix(
         self,
-        code_content: str,
+        code_repo: Dict[str, str],
         language: str = "python",
-        filename: str = "main.py",
-        dependencies: Optional[List[str]] = None
+        entry_point: str = "main.py",
+        dependencies: Optional[List[str]] = None,
+        feedback: Optional[str] = None,
+        project_id: str = "current"
     ) -> AgentMessage:
         """
         Execute code and automatically fix errors with retry logic.
-        
-        This is the main entry point for the Reflexion Engine workflow.
-        
-        Args:
-            code_content: Code to execute
-            language: Programming language
-            filename: Filename for the code
-            dependencies: List of dependencies to install
-            
-        Returns:
-            AgentMessage with execution results or escalation request
         """
-        code = Code(
-            content=code_content,
-            language=language,
-            filename=filename
-        )
-        
+        if isinstance(code_repo, str):
+            code_repo = {entry_point: code_repo}
+
         attempt = 0
         execution_history = []
+        current_repo = code_repo.copy()
         
+        # Extract dependencies from requirements.txt if present
+        if not dependencies and "requirements.txt" in current_repo:
+            try:
+                req_content = current_repo["requirements.txt"]
+                dependencies = [line.strip() for line in req_content.split('\n') 
+                              if line.strip() and not line.startswith('#')]
+                logger.info(f"Extracted {len(dependencies)} dependencies from requirements.txt")
+            except Exception as e:
+                logger.warning(f"Failed to extract dependencies: {e}")
+
         while attempt < self.MAX_RETRY_ATTEMPTS:
             attempt += 1
             logger.info(f"Execution attempt {attempt}/{self.MAX_RETRY_ATTEMPTS}")
             
             # Execute code
-            result = await self.execute_code(code, self.sandbox_env)
+            result = await self.execute_code(current_repo, self.sandbox_env, language, entry_point, dependencies)
             execution_history.append({
                 "attempt": attempt,
                 "success": result.success,
@@ -397,6 +404,7 @@ class ReflexionEngine(Agent):
                     message_type=MessageType.RESPONSE,
                     payload={
                         "status": "success",
+                        "code_repo": current_repo,
                         "result": {
                             "stdout": result.stdout,
                             "stderr": result.stderr,
@@ -429,41 +437,76 @@ class ReflexionEngine(Agent):
             # Analyze errors
             analysis = await self.analyze_errors(result)
             
+            # Include feedback if available
+            error_context = f"Error: {analysis.error_message}\nRoot Cause: {analysis.root_cause}"
+            if feedback:
+                error_context += f"\nAdditional Feedback: {feedback}"
+
             # Generate fixes
-            fixes = await self.generate_fixes(analysis, code.content)
+            # For multi-file, we currently focus on the entry point or use LLM to decide
+            # Simplified for now: use LLM to generate a fix plan for the repo
+            system_prompt = """You are an expert code debugger.
+            Analyze the error and the project files. 
+            Provide a fix plan to resolve the issue.
+            Since you are in a self-healing loop, respond with the 'fix_plan' string only.
+            """
             
-            if not fixes:
-                logger.warning("No fixes generated, escalating")
-                return AgentMessage(
-                    sender=self.agent_type,
-                    recipient=AgentType.ENGINEER,
-                    message_type=MessageType.ERROR,
-                    payload={
-                        "status": "escalated",
-                        "reason": "Unable to generate fixes",
-                        "error_analysis": {
-                            "error_type": analysis.error_type,
-                            "root_cause": analysis.root_cause,
-                            "suggestions": analysis.suggested_fixes,
-                        },
-                        "execution_history": execution_history,
-                    }
-                )
+            user_prompt = f"""
+            Project Files:
+            {json.dumps(current_repo, indent=2)}
             
-            # Apply fixes
-            code = await self.apply_fixes(code, fixes)
-            logger.info(f"Applied fixes, retrying execution (attempt {attempt + 1})")
+            Execution Error:
+            {error_context}
+            
+            Please provide a fix plan to resolve this.
+            """
+            
+            # KG Context Integration
+            kg_context = ""
+            if self.kg_tools:
+                try:
+                    # Try to get impact analysis for the entry point or failing file
+                    focus_file = entry_point
+                    component_name = os.path.basename(focus_file).split('.')[0]
+                    impact_data = await self.kg_tools.analyze_change_impact(
+                        project_id=project_id,
+                        component_name=component_name
+                    )
+                    kg_context = f"\n\nKNOWLEDGE GRAPH IMPACT ANALYSIS:\n{self.kg_tools.format_for_llm(impact_data)}\n"
+                except Exception as e:
+                    print(f"KG Impact analysis failed: {e}")
+
+            messages = [
+                LLMMessage(role="system", content=system_prompt),
+                LLMMessage(role="user", content=f"{user_prompt}{kg_context}")
+            ]
+            
+            response = await self.llm.generate(messages, temperature=0.3)
+
+            fix_plan = response.content
+            
+            # Return to engineer with fix plan
+            return AgentMessage(
+                sender=self.agent_type,
+                recipient=AgentType.ENGINEER,
+                message_type=MessageType.TASK,
+                payload={
+                    "status": "needs_fixes",
+                    "fix_plan": fix_plan,
+                    "error": error_context,
+                    "execution_history": execution_history
+                }
+            )
         
         # Max retries exceeded
-        logger.error("Max retries exceeded without success")
         return AgentMessage(
             sender=self.agent_type,
             recipient=AgentType.ENGINEER,
             message_type=MessageType.ERROR,
             payload={
                 "status": "failed",
-                "reason": f"Max retries ({self.MAX_RETRY_ATTEMPTS}) exceeded",
-                "execution_history": execution_history,
+                "reason": "Max retries exceeded",
+                "execution_history": execution_history
             }
         )
     
@@ -494,9 +537,22 @@ class ReflexionEngine(Agent):
         Please provide a fix plan.
         """
 
+        # KG Context Integration
+        kg_context = ""
+        if self.kg_tools:
+            try:
+                # Use a general project-level context for review reflection
+                context_data = await self.kg_tools.get_component_context(
+                    project_id="current",
+                    component_name="main" # Default focus for legacy mode
+                )
+                kg_context = f"\n\nKNOWLEDGE GRAPH ARCHITECTURAL CONTEXT:\n{self.kg_tools.format_for_llm(context_data)}\n"
+            except Exception as e:
+                print(f"KG Context retrieval failed: {e}")
+
         messages = [
             LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=user_prompt)
+            LLMMessage(role="user", content=f"{user_prompt}{kg_context}")
         ]
 
         response = await self.llm.generate(messages, temperature=0.5)

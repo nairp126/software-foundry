@@ -213,6 +213,108 @@ class KnowledgeGraphTools:
         
         return [dict(record) for record in results]
     
+    async def get_surgical_context(
+        self,
+        project_id: str,
+        dependency_names: List[str],
+        max_snippet_chars: int = 1500
+    ) -> str:
+        """Retrieve source code snippets for specific dependencies from the KG.
+        
+        This is the core GraphRAG retrieval: instead of passing ALL previously
+        generated code (which bloats the context window), we query the graph
+        for ONLY the specific functions/classes that the current file depends on.
+        
+        Args:
+            project_id: Project identifier
+            dependency_names: List of function/class names to retrieve
+            max_snippet_chars: Max chars per snippet to stay within context limits
+            
+        Returns:
+            Formatted string of dependency source code for LLM injection
+        """
+        if not dependency_names:
+            return ""
+        
+        query = """
+        MATCH (project:Project {project_id: $project_id})
+        MATCH (project)-[:CONTAINS*]->(node)
+        WHERE node.name IN $names AND node.content IS NOT NULL AND node.content <> ''
+        RETURN node.name as name, 
+               node.file_path as file_path,
+               node.content as content,
+               labels(node)[0] as type
+        """
+        
+        try:
+            results = await self.kg_service.client.execute_query(
+                query,
+                project_id=project_id,
+                names=dependency_names
+            )
+            
+            if not results:
+                return ""
+            
+            context_parts = []
+            for record in results:
+                name = record.get("name", "unknown")
+                file_path = record.get("file_path", "unknown")
+                node_type = record.get("type", "Component")
+                content = record.get("content", "")
+                
+                # Truncate individual snippets if very large
+                if len(content) > max_snippet_chars:
+                    content = content[:max_snippet_chars] + "\n    # ... [truncated]"
+                
+                context_parts.append(
+                    f"# [{node_type}] {name} (from {file_path})\n{content}"
+                )
+            
+            if context_parts:
+                header = "\n\nKNOWLEDGE GRAPH CONTEXT — Existing Dependencies:\n"
+                header += "The following are REAL implementations already in the project. "
+                header += "You MUST be compatible with these signatures and patterns.\n\n"
+                return header + "\n\n".join(context_parts)
+            
+            return ""
+            
+        except Exception as e:
+            self.kg_service.client.logger.error(f"Surgical context retrieval failed: {e}")
+            return ""
+
+    async def get_project_file_map(
+        self,
+        project_id: str
+    ) -> List[Dict[str, Any]]:
+        """Get a lightweight map of all files and their exported symbols.
+        
+        This gives the engineer a 'table of contents' of what already exists
+        without needing the full source code of every file.
+        
+        Args:
+            project_id: Project identifier
+            
+        Returns:
+            List of file summaries with their exported symbols
+        """
+        query = """
+        MATCH (project:Project {project_id: $project_id})
+        MATCH (project)-[:CONTAINS*]->(m:Module)
+        RETURN m.file_path as file_path, 
+               m.exports as exports,
+               m.imports as imports
+        """
+        
+        try:
+            results = await self.kg_service.client.execute_query(
+                query,
+                project_id=project_id
+            )
+            return [dict(record) for record in results]
+        except Exception:
+            return []
+
     def format_for_llm(self, data: Any) -> str:
         """Format knowledge graph data for LLM consumption.
         

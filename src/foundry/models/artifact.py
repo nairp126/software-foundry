@@ -16,6 +16,8 @@ class ArtifactType(str, enum.Enum):
     documentation = "documentation"
     diagram = "diagram"
     log = "log"
+    review = "review"
+    devops = "devops"
 
 
 class Artifact(BaseModel, Base):

@@ -38,6 +38,7 @@ class GraphState(TypedDict):
     review_feedback: Dict[str, Any]
     project_id: str  # UUID string for DB persistence
     reflexion_count: int  # tracks how many review→reflexion cycles have occurred
+    success_flag: bool  # tracks if the code was successfully deployed
 
 
 class AgentOrchestrator:
@@ -113,7 +114,7 @@ class AgentOrchestrator:
                 state["project_id"], 
                 "prd.md", 
                 prd, 
-                ArtifactType.DOCUMENTATION
+                ArtifactType.documentation
             )
             
         return {
@@ -142,7 +143,7 @@ class AgentOrchestrator:
                 state["project_id"], 
                 "architecture.md", 
                 architecture, 
-                ArtifactType.DOCUMENTATION
+                ArtifactType.documentation
             )
             
         return {
@@ -159,11 +160,15 @@ class AgentOrchestrator:
         
         # If we came from reflexion, we might have specific fixes to apply
         reflexion_feedback = state.get("review_feedback", {}).get("reflexion_fix", "")
+        existing_code = state["project_context"].get("code_repo", {})
         
         payload = {
             "architecture": architecture,
             "prd": prd,
-            "fix_instructions": reflexion_feedback
+            "fix_instructions": reflexion_feedback,
+            "existing_code": existing_code,
+            "project_id": state["project_id"],
+            "entry_point": "main.py"
         }
         
         message = AgentMessage(
@@ -174,7 +179,9 @@ class AgentOrchestrator:
         )
         
         response = await self.engineer_agent.process_message(message)
-        code_repo = response.payload.get("code_repo", {}) if response else {}
+        code_repo = {}
+        if response and response.payload:
+            code_repo = response.payload.get("code_repo") or response.payload.get("code") or {}
         
         # Store code artifacts
         for file_path, content in code_repo.items():
@@ -182,9 +189,21 @@ class AgentOrchestrator:
                 state["project_id"],
                 file_path,
                 content,
-                ArtifactType.CODE if file_path.endswith(".py") else ArtifactType.TEST
+                ArtifactType.code
             )
             
+        # EARLY INGESTION: Ingest into Knowledge Graph after first generation or repair
+        try:
+            project_path = os.path.join(settings.generated_projects_path, state["project_id"])
+            await ingestion_pipeline.ingest_project(
+                project_id=state["project_id"],
+                project_name=f"Python Project {state['project_id'][:8]}",
+                project_path=project_path
+            )
+            logger.info(f"Project {state['project_id']} successfully ingested/updated in KG")
+        except Exception as e:
+            logger.error(f"Early KG ingestion failed: {e}")
+
         return {
             "messages": [AIMessage(content=f"Code generated for {len(code_repo)} files.")],
             "project_context": {"code_repo": code_repo, "architecture": architecture, "prd": prd}
@@ -200,14 +219,40 @@ class AgentOrchestrator:
             sender=AgentType.ENGINEER,
             recipient=AgentType.CODE_REVIEW,
             message_type=MessageType.TASK,
-            payload={"code_repo": code_repo}
+            payload={
+                "code_repo": code_repo,
+                "project_id": state["project_id"]
+            }
         )
         
         response = await self.code_review_agent.process_message(message)
-        review_results = response.payload if response else {"approved": False, "comments": "Review failed"}
+        review_results = response.payload if response else {"status": "REJECTED", "feedback": "Review failed"}
+        
+        # Bridge status/approved fields for LangGraph routing
+        is_approved = review_results.get("status") == "APPROVED"
+        
+        # FAIL-SAFE: Re-verify that no JS leaked into an "APPROVED" review
+        if is_approved:
+            patterns = ["const ", "require(", "import React", "express()", "module.exports", "export default"]
+            for file_path, content in code_repo.items():
+                if any(p in content for p in patterns):
+                    is_approved = False
+                    review_results["status"] = "REJECTED"
+                    review_results["feedback"] = "REVIEWER FAIL-SAFE: JS leakage detected in approved repo. Rejecting for Python rewrite."
+                    break
+
+        review_results["approved"] = is_approved
+        
+        # Store review as artifact
+        await self._store_artifact(
+            state["project_id"],
+            "code_review.json",
+            json.dumps(review_results, indent=2),
+            ArtifactType.review
+        )
         
         return {
-            "messages": [AIMessage(content=f"Code review completed. Approved: {review_results.get('approved')}")],
+            "messages": [AIMessage(content=f"Code review completed. Status: {review_results.get('status')}")],
             "review_feedback": review_results
         }
 
@@ -222,7 +267,12 @@ class AgentOrchestrator:
             sender=AgentType.CODE_REVIEW,
             recipient=AgentType.REFLEXION,
             message_type=MessageType.TASK,
-            payload={"code_repo": code_repo, "feedback": review_comments}
+            payload={
+                "task_type": "execute_and_fix",
+                "code_repo": code_repo,
+                "feedback": review_comments,
+                "project_id": state["project_id"]
+            }
         )
         
         response = await self.reflexion_agent.process_message(message)
@@ -239,34 +289,39 @@ class AgentOrchestrator:
         await self._update_project_status(state["project_id"], ProjectStatus.running_devops)
         
         code_repo = state["project_context"].get("code_repo", {})
+        architecture = state["project_context"].get("architecture", "")
         
         message = AgentMessage(
             sender=AgentType.ENGINEER,
             recipient=AgentType.DEVOPS,
             message_type=MessageType.TASK,
-            payload={"code_repo": code_repo}
+            payload={
+                "code_repo": code_repo,
+                "architecture": architecture
+            }
         )
         
         response = await self.devops_agent.process_message(message)
-        deployment_results = response.payload if response else {"success": False}
+        deployment_results = response.payload if response else {}
         
-        # After successful generation and deployment, ingest into Knowledge Graph
-        try:
-            project_path = os.path.join(settings.generated_projects_path, state["project_id"])
-            await ingestion_pipeline.ingest_project(
-                project_id=state["project_id"],
-                project_name=f"Project {state['project_id'][:8]}",
-                project_path=project_path
+        # Store deployment files as artifacts
+        for filename, content in deployment_results.items():
+            await self._store_artifact(
+                state["project_id"],
+                filename,
+                content,
+                ArtifactType.devops
             )
-            logger.info(f"Project {state['project_id']} ingested into Knowledge Graph")
-        except Exception as e:
-            logger.error(f"Failed to ingest project into Knowledge Graph: {e}")
-            
-        await self._update_project_status(state["project_id"], ProjectStatus.completed)
+        
+        # After successful generation and deployment
+        # KG Ingestion already happened in Engineer node for early context availability
+        
+        # REMOVED: Redundant status update. 'run' method handles final status.
         
         return {
             "messages": [AIMessage(content="DevOps and deployment tasks completed.")],
-            "project_context": {**state["project_context"], "deployment": deployment_results}
+            "project_context": {**state["project_context"], "deployment": deployment_results},
+            "success_flag": True
         }
 
     def _should_continue_from_review(self, state: GraphState) -> str:
@@ -307,6 +362,10 @@ class AgentOrchestrator:
         # Handle subdirectories in artifact name
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
+        # CLEANING: Strip markdown backticks for code files
+        if artifact_type == ArtifactType.code:
+            content = content.replace("```python", "").replace("```javascript", "").replace("```js", "").replace("```", "").strip()
+        
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
             
@@ -315,10 +374,9 @@ class AgentOrchestrator:
             try:
                 artifact = Artifact(
                     project_id=project_id,
-                    name=name,
+                    filename=name,
                     content=content,
-                    artifact_type=artifact_type,
-                    file_path=file_path
+                    artifact_type=artifact_type
                 )
                 session.add(artifact)
                 await session.commit()
@@ -334,18 +392,27 @@ class AgentOrchestrator:
             "project_context": {},
             "review_feedback": {},
             "project_id": project_id,
-            "reflexion_count": 0
+            "reflexion_count": 0,
+            "success_flag": False
         }
         
         try:
+            final_state = initial_state
             async for output in self.graph.astream(initial_state):
                 # We can emit logs or events here for real-time tracking
                 for key, value in output.items():
                     logger.debug(f"Graph node {key} finished")
+                    # Update final_state with the latest values from the node output
+                    final_state = {**final_state, **value}
                     
-            await self._update_project_status(project_id, ProjectStatus.completed)
+            if final_state.get("success_flag"):
+                await self._update_project_status(project_id, ProjectStatus.completed)
+                logger.info(f"Project {project_id} completed successfully.")
+            else:
+                await self._update_project_status(project_id, ProjectStatus.failed)
+                logger.warning(f"Project {project_id} ended without reaching successful deployment.")
             return True
         except Exception as e:
-            logger.error(f"Orchestrator failed: {e}")
+            logger.error(f"Orchestrator failed: {e}", exc_info=True)
             await self._update_project_status(project_id, ProjectStatus.failed)
             return False

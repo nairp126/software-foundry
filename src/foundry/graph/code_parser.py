@@ -22,6 +22,7 @@ class FunctionInfo:
     decorators: List[str] = field(default_factory=list)
     calls: List[str] = field(default_factory=list)
     docstring: Optional[str] = None
+    content: Optional[str] = None  # Source code snippet for GraphRAG
 
 
 @dataclass
@@ -34,6 +35,7 @@ class ClassInfo:
     base_classes: List[str] = field(default_factory=list)
     decorators: List[str] = field(default_factory=list)
     docstring: Optional[str] = None
+    content: Optional[str] = None  # Source code snippet for GraphRAG
 
 
 @dataclass
@@ -117,7 +119,13 @@ class PythonCodeParser:
             with open(file_path, 'r', encoding='utf-8') as f:
                 source = f.read()
             
+            # DEFENSIVE: Strip markdown backticks if they leaked through
+            if "```" in source:
+                source = source.replace("```python", "").replace("```", "").strip()
+            
             tree = ast.parse(source, filename=file_path)
+            # Store source for content extraction in _parse_function/_parse_class
+            self._current_source = source
             return self._parse_tree(tree, file_path)
         
         except SyntaxError as e:
@@ -202,6 +210,13 @@ class PythonCodeParser:
         # Extract decorators
         decorators = [ast.unparse(dec) for dec in node.decorator_list]
         
+        # Extract source code snippet for GraphRAG
+        content = None
+        try:
+            content = ast.get_source_segment(self._current_source, node)
+        except Exception:
+            pass
+
         return FunctionInfo(
             name=node.name,
             signature=signature,
@@ -211,7 +226,8 @@ class PythonCodeParser:
             is_async=isinstance(node, ast.AsyncFunctionDef),
             decorators=decorators,
             calls=list(call_visitor.calls),
-            docstring=ast.get_docstring(node)
+            docstring=ast.get_docstring(node),
+            content=content
         )
     
     def _parse_class(self, node: ast.ClassDef) -> ClassInfo:
@@ -233,6 +249,13 @@ class PythonCodeParser:
         # Extract decorators
         decorators = [ast.unparse(dec) for dec in node.decorator_list]
         
+        # Extract source code snippet for GraphRAG
+        content = None
+        try:
+            content = ast.get_source_segment(self._current_source, node)
+        except Exception:
+            pass
+
         return ClassInfo(
             name=node.name,
             line_number=node.lineno,
@@ -240,7 +263,8 @@ class PythonCodeParser:
             methods=methods,
             base_classes=base_classes,
             decorators=decorators,
-            docstring=ast.get_docstring(node)
+            docstring=ast.get_docstring(node),
+            content=content
         )
     
     def parse_directory(

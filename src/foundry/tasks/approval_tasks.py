@@ -1,12 +1,12 @@
 """Celery tasks for approval workflow background processing."""
 
 from celery import shared_task
-from foundry.celery_app import celery_app
+from foundry.celery_app import app
 from foundry.database import AsyncSessionLocal
 from foundry.services.approval_service import approval_service
 
 
-@celery_app.task(name="foundry.tasks.process_expired_approvals")
+@app.task(name="foundry.tasks.process_expired_approvals")
 def process_expired_approvals_task():
     """Background task to process expired approval requests.
     

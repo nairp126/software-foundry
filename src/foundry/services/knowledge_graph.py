@@ -94,6 +94,7 @@ class KnowledgeGraphService:
         line_number: int,
         complexity: int,
         parent_component_id: Optional[str] = None,
+        content: Optional[str] = None,
     ) -> None:
         """Store a function node in the graph."""
         query = """
@@ -105,6 +106,7 @@ class KnowledgeGraphService:
             file_path: $file_path,
             line_number: $line_number,
             complexity: $complexity,
+            content: $content,
             created_at: datetime()
         })
         CREATE (p)-[:CONTAINS]->(f)
@@ -129,6 +131,7 @@ class KnowledgeGraphService:
                 "file_path": file_path,
                 "line_number": line_number,
                 "complexity": complexity,
+                "content": content or "",
                 "parent_component_id": parent_component_id,
             }
         )
@@ -143,6 +146,7 @@ class KnowledgeGraphService:
         methods: List[str],
         base_classes: List[str],
         parent_component_id: Optional[str] = None,
+        content: Optional[str] = None,
     ) -> None:
         """Store a class node in the graph."""
         query = """
@@ -154,6 +158,7 @@ class KnowledgeGraphService:
             line_number: $line_number,
             methods: $methods,
             base_classes: $base_classes,
+            content: $content,
             created_at: datetime()
         })
         CREATE (p)-[:CONTAINS]->(c)
@@ -178,6 +183,7 @@ class KnowledgeGraphService:
                 "line_number": line_number,
                 "methods": methods,
                 "base_classes": base_classes,
+                "content": content or "",
                 "parent_component_id": parent_component_id,
             }
         )

@@ -35,12 +35,12 @@ def test_flow():
     print(f"Project created with ID: {project_id}")
 
     # 3. Monitor status
-    print("\nMonitoring status (max 2 minutes)...")
-    for i in range(12):
-        time.sleep(10)
+    print("\nMonitoring status (max 20 minutes)...")
+    for i in range(60):
+        time.sleep(20)
         resp = requests.get(f"{BASE_URL}/projects/{project_id}")
         data = resp.json()
-        print(f"[{i*10}s] Status: {data['status']}")
+        print(f"[{i*20}s] Status: {data['status']}")
         if data['status'] in ["completed", "failed"]:
             break
     

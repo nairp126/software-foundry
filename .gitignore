@@ -75,3 +75,5 @@ dmypy.json
 data/
 temp/
 sandbox/
+
+generated_projects/

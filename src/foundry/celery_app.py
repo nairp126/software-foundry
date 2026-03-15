@@ -3,13 +3,13 @@
 from celery import Celery
 from foundry.config import settings
 
-celery_app = Celery(
+app = Celery(
     "foundry",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
 )
 
-celery_app.conf.update(
+app.conf.update(
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
@@ -21,4 +21,4 @@ celery_app.conf.update(
 )
 
 # Auto-discover tasks
-celery_app.autodiscover_tasks(["foundry.agents", "foundry.tasks"])
+app.autodiscover_tasks(["foundry.agents", "foundry.tasks"])

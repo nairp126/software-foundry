@@ -11,24 +11,25 @@ class DevOpsAgent(Agent):
     async def process_message(self, message: AgentMessage) -> AgentMessage:
         if message.message_type == MessageType.TASK:
             architecture = message.payload.get("architecture")
-            return await self.prepare_deployment(architecture)
+            code_repo = message.payload.get("code_repo")
+            return await self.prepare_deployment(architecture, code_repo)
         return None
 
-    async def prepare_deployment(self, architecture: Dict[str, Any]) -> AgentMessage:
+    async def prepare_deployment(self, architecture: Dict[str, Any], code_repo: Optional[str] = None) -> AgentMessage:
         """
         Generates deployment configurations (Dockerfile, docker-compose.yml) based on architecture.
         """
         system_prompt = """You are an expert DevOps Engineer.
         Your goal is to generate the necessary deployment configuration files for the project.
         
-        Based on the architecture provided, generate:
-        1.  `Dockerfile`: For the application.
+        Based on the architecture provided (RESTRICTION: Project is ALWAYS Python-based):
+        1.  `Dockerfile`: For the application using a Python base image (e.g., python:3.11-slim).
         2.  `docker-compose.yml`: For the application and its dependencies (e.g., database, redis).
         
         Return the result as a JSON object where keys are filenames and values are file content.
         Example:
         {
-            "Dockerfile": "FROM python:3.9...",
+            "Dockerfile": "FROM python:3.11-slim...",
             "docker-compose.yml": "version: '3.8'..."
         }
         """
@@ -43,9 +44,19 @@ class DevOpsAgent(Agent):
         # Use Qwen to generate the deployment files
         response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
         
+        # Ensure it's a dict
+        deployment_data = response.content
+        if isinstance(deployment_data, str):
+            try:
+                # CLEANING: Strip markdown backticks
+                deployment_data = deployment_data.replace("```json", "").replace("```", "").strip()
+                deployment_data = json.loads(deployment_data)
+            except:
+                deployment_data = {}
+
         return AgentMessage(
             sender=self.agent_type,
-            recipient=AgentType.ENGINEER,  # Feedback loop or End
+            recipient=AgentType.ENGINEER,
             message_type=MessageType.TASK,
-            payload={"deployment_files": response.content}
+            payload=deployment_data
         )

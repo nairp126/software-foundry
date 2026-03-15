@@ -99,7 +99,8 @@ class IngestionPipeline:
                             file_path=file_path,
                             line_number=func.line_number,
                             complexity=func.complexity,
-                            parent_component_id=component_id
+                            parent_component_id=component_id,
+                            content=func.content
                         )
                         stats["functions_created"] += 1
                     
@@ -114,7 +115,8 @@ class IngestionPipeline:
                             line_number=cls.line_number,
                             methods=cls.methods,
                             base_classes=cls.base_classes,
-                            parent_component_id=component_id
+                            parent_component_id=component_id,
+                            content=cls.content
                         )
                         stats["classes_created"] += 1
                 
