@@ -74,6 +74,16 @@ class ApprovalRequest(BaseModel, Base):
         nullable=True,
         doc="When this approval request should auto-cancel",
     )
+    stage = Column(
+        String(64),
+        nullable=True,
+        doc="Pipeline stage this approval belongs to (e.g. 'plan', 'deployment')",
+    )
+    reviewer_comment = Column(
+        Text,
+        nullable=True,
+        doc="Comment left by the reviewer when approving or rejecting",
+    )
     responded_at = Column(
         DateTime,
         nullable=True,
