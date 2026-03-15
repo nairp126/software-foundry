@@ -12,6 +12,8 @@ class ProjectCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     requirements: str = Field(..., min_length=1)
     description: Optional[str] = None
+    language: Optional[str] = "python"
+    framework: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):

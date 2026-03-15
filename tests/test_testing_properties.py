@@ -34,17 +34,26 @@ class TestTestingProperties:
         """
         **Validates: Requirements 17.3**
         
-        Property: Generated test filenames should preserve the file extension
-        and follow framework conventions.
+        Property: Generated test filenames should be non-empty strings that follow
+        the framework's naming convention (not necessarily preserving the input extension,
+        since cross-language frameworks like Jest/Vitest/JUnit change the extension).
         """
         generator = TestGenerator()
         test_filename = generator.get_test_filename(filename, framework)
         assert isinstance(test_filename, str)
         assert len(test_filename) > 0
-        # Should contain the original extension
+        # Verify framework-specific naming conventions
         import pathlib
-        original_ext = pathlib.Path(filename).suffix
-        assert original_ext in test_filename
+        stem = pathlib.Path(filename).stem
+        if framework == TestFramework.PYTEST:
+            assert test_filename.endswith(".py")
+            assert "test" in test_filename.lower()
+        elif framework == TestFramework.JEST:
+            assert test_filename.endswith(".test.js")
+        elif framework == TestFramework.VITEST:
+            assert test_filename.endswith(".test.ts")
+        elif framework == TestFramework.JUNIT:
+            assert test_filename.endswith("Test.java")
 
     @given(
         st.dictionaries(

@@ -23,9 +23,9 @@ class TestTestGenerator:
         assert framework == TestFramework.JEST
 
     def test_select_framework_typescript(self, generator):
-        """Test framework selection for TypeScript."""
+        """Test framework selection for TypeScript — should return VITEST per spec."""
         framework = generator.select_framework("typescript")
-        assert framework == TestFramework.JEST
+        assert framework == TestFramework.VITEST
 
     def test_select_framework_with_vitest_stack(self, generator):
         """Test framework selection with Vitest in tech stack."""
@@ -39,8 +39,13 @@ class TestTestGenerator:
         assert filename == "test_calculator.py"
 
     def test_get_test_filename_jest(self, generator):
-        """Test filename generation for Jest."""
-        filename = generator.get_test_filename("calculator.ts", TestFramework.JEST)
+        """Test filename generation for Jest — uses .js source, produces .test.js."""
+        filename = generator.get_test_filename("calculator.js", TestFramework.JEST)
+        assert filename == "calculator.test.js"
+
+    def test_get_test_filename_vitest(self, generator):
+        """Test filename generation for Vitest — uses .ts source, produces .test.ts."""
+        filename = generator.get_test_filename("calculator.ts", TestFramework.VITEST)
         assert filename == "calculator.test.ts"
 
     def test_get_test_filename_junit(self, generator):

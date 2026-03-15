@@ -20,12 +20,15 @@ class EngineerAgent(Agent):
     - Component integration and dependency management
     """
     
-    # Language-specific coding standards (Python-Only Enforcement)
+    # Language-specific coding standards
     CODING_STANDARDS = {
-        "python": "PEP 8 (Strict Enforcement)"
+        "python": "PEP 8",
+        "javascript": "ESLint Standard",
+        "typescript": "ESLint + TypeScript Strict",
+        "java": "Google Java Style",
     }
     
-    # Security patterns to enforce (Python-specific)
+    # Security patterns to enforce
     SECURITY_PATTERNS = {
         "input_validation": True,
         "sql_injection_prevention": True,
@@ -33,7 +36,6 @@ class EngineerAgent(Agent):
         "secure_authentication": True,
         "input_sanitization": True,
         "error_message_sanitization": True,
-        "bandit_compliance": True
     }
     
     # Fix 2: Comprehensive JS Detection Regex
@@ -65,13 +67,18 @@ class EngineerAgent(Agent):
         if message.message_type == MessageType.TASK:
             architecture = message.payload.get("architecture", "")
             prd = message.payload.get("prd", "")
-            requirements = message.payload.get("requirements", "") # Fix L
+            requirements = message.payload.get("requirements", "")
             fix_instructions = message.payload.get("fix_instructions", "")
             existing_code = message.payload.get("existing_code", {})
-            
+            graph_state_language = message.payload.get("language", "")
+
             if not architecture:
                 return None
-            return await self.generate_code(architecture, prd, requirements, fix_instructions, existing_code, message.payload.get("project_id", "current"))
+            return await self.generate_code(
+                architecture, prd, requirements, fix_instructions, existing_code,
+                message.payload.get("project_id", "current"),
+                graph_state_language=graph_state_language,
+            )
         return None
 
     async def _request_code_generation(self, filename: str, architecture: str, language: str, coding_standard: str, prd: str = "", requirements: str = "", context: str = "", fix_instructions: str = "", existing_version: str = None) -> str:
@@ -82,74 +89,119 @@ class EngineerAgent(Agent):
         grounding_anchor = f"\nABSOLUTE DOMAIN: {requirements}\n" if requirements else ""
         system_prompt = f"""You are an expert Software Engineer.{grounding_anchor}
         Your goal is to write high-quality, professional-grade code for the file: {filename}
+
+        Language: {language}
+        Coding Standard: {coding_standard}
+
+        Requirements:
+        - Follow {coding_standard} coding standards
+        - Apply security best practices throughout
+        - Include input validation for all external inputs
+        - Add comprehensive error handling with try/except blocks
+        - Use environment variables for secrets, never hardcode credentials
+        - Write clean, readable, well-documented code
+
+        {context}
         """
-    async def generate_code(self, architecture_content: str, prd_content: str = "", requirements: str = "", fix_instructions: str = "", existing_code: Dict[str, str] = None, project_id: str = "current") -> AgentMessage:
+
+        if fix_instructions:
+            user_prompt = f"Fix the following issues in {filename}:\n{fix_instructions}\n\nExisting code:\n{existing_version or ''}\n\nArchitecture:\n{architecture}"
+        else:
+            user_prompt = f"Generate the file {filename} for this architecture:\n{architecture}"
+            if prd:
+                user_prompt += f"\n\nProduct Requirements:\n{prd}"
+
+        messages = [
+            LLMMessage(role="system", content=system_prompt),
+            LLMMessage(role="user", content=user_prompt),
+        ]
+        response = await self.llm.generate(messages, temperature=0.2)
+        return self._clean_code(response.content)
+    async def generate_code(self, architecture_content: str, prd_content: str = "", requirements: str = "", fix_instructions: str = "", existing_code: Dict[str, str] = None, project_id: str = "current", graph_state_language: str = "") -> AgentMessage:
         """
         Generate code based on architecture with quality and security measures.
         """
+        from foundry.utils.language_guards import detect_language_mismatch
+        from foundry.utils.language_config import get_language_config
+
         # Step 1: Plan file structure
         file_structure = await self._plan_file_structure(architecture_content, prd_content)
-        
-        # Step 2: Detect language from architecture (Hardened to Python)
-        language = "python" # Force Python as per system constraints
-        
+
+        # Step 2: Detect language from GraphState
+        language = self._detect_language(architecture_content, graph_state_language)
+        lang_config = get_language_config(language)
+
         # Step 3: Generate code for each file sequentially for stability
         generated_files = {}
         files_to_generate = self._parse_file_list(file_structure)
         files_to_generate = files_to_generate[:3]  # Keep MVP limit
-        
-        for filename in files_to_generate:
+
+        for i, filename in enumerate(files_to_generate):
             print(f"DEBUG: Generating content for {filename}...")
-            # Pass existing_code for incremental repair
+
+            # KG: inject project summary into the first file's prompt (Req 16.1 / 19.3)
+            kg_project_summary = ""
+            if i == 0 and self.kg_tools:
+                try:
+                    kg_project_summary = await self.kg_tools.get_project_summary_for_generation(project_id)
+                except Exception as e:
+                    print(f"KG project summary retrieval failed: {e}")
+
             code = await self._generate_file_content(
-                filename, 
-                architecture_content, 
-                language, 
-                generated_files, 
-                prd_content, 
-                requirements, # Fix L
+                filename,
+                architecture_content,
+                language,
+                generated_files,
+                prd_content,
+                requirements,
                 fix_instructions,
                 existing_code.get(filename) if existing_code else None,
-                project_id
+                project_id,
+                kg_project_summary=kg_project_summary,
             )
-            
-            # Fix 3: 3-Attempt Recovery Loop
+
+            # 3-Attempt Language-Aware Recovery Loop
             for attempt in range(3):
-                if filename.endswith(".py") and self._has_js_leakage(code):
-                    print(f"CRITICAL: JS leakage detected in {filename} (Attempt {attempt+1}). Retrying with Python force...")
-                    code = await self._recover_with_python_force(filename, code, architecture_content)
+                if detect_language_mismatch(code, language):
+                    print(f"Language mismatch in {filename} (attempt {attempt + 1}). Recovering...")
+                    code = await self._recover_with_correct_language(filename, code, architecture_content, language)
                 else:
                     break
             else:
-                # All 3 attempts failed — generate a minimal stub instead of persisting JS
-                print(f"FATAL: All recovery attempts failed for {filename}. Generating Auto-stub.")
-                code = f'# Auto-stub: generation failed for {filename} due to persistent JS leakage.\nraise NotImplementedError("{filename} requires manual implementation")\n'
-            
+                # All 3 attempts failed — generate a minimal stub
+                print(f"FATAL: All recovery attempts failed for {filename}. Generating stub.")
+                code = (
+                    f"# Auto-stub: generation failed for {filename}.\n"
+                    f"raise NotImplementedError('{filename} requires manual implementation')\n"
+                )
+
             generated_files[filename] = code
-        
-        # Final "Last-Mile" Sanity Check: Force extensions on all keys
+
+        # For non-Python projects, do NOT rename extensions
         final_repo = {}
         for filename, content in generated_files.items():
             f_clean = filename.strip()
-            # If it's a code file with a non-python extension, RENAME IT
-            if any(f_clean.lower().endswith(ext) for ext in ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs']):
-                new_name = os.path.splitext(f_clean)[0] + ".py"
-                final_repo[new_name] = content
+            if language == "python":
+                # Python-only: rename forbidden extensions to .py
+                if any(f_clean.lower().endswith(ext) for ext in ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs']):
+                    new_name = os.path.splitext(f_clean)[0] + ".py"
+                    final_repo[new_name] = content
+                else:
+                    final_repo[f_clean] = content
             else:
                 final_repo[f_clean] = content
-        
-        # Sync tests and quality gates to use the cleaned repo
+
         test_files = await self.generate_tests(final_repo, language)
         quality_result = await self.run_quality_gates(final_repo, language, "/tmp/project")
         integration_report = self._validate_component_integration(final_repo)
-            
+
         return AgentMessage(
             sender=self.agent_type,
             recipient=AgentType.CODE_REVIEW,
             message_type=MessageType.TASK,
             payload={
                 "code_repo": final_repo,
-                "code": final_repo,  # Backward compatibility
+                "code": final_repo,
                 "tests": test_files,
                 "file_structure": file_structure,
                 "integration_report": integration_report,
@@ -158,17 +210,20 @@ class EngineerAgent(Agent):
             }
         )
     
-    async def _plan_file_structure(self, architecture: str, prd: str = "") -> str:
-        system_prompt = f"""You are a Python Expert.
-        Plan the file structure for a project based on the following architecture.
-        
-        ABSOLUTE REQUIREMENT: You MUST use ONLY .py extensions for code files.
-        PROHIBITED: No .js, .ts, .jsx, .html, .css, .java, .go, .rs.
-        If the architecture suggests a 'Frontend' with 'React', use 'FastAPI' with 'Jinja2' patterns.
-        
-        Return ONLY a JSON list of absolute file paths (e.g. ["src/main.py", "src/utils.py", "requirements.txt"]).
-        """
-        
+    async def _plan_file_structure(self, architecture: str, prd: str = "", language: str = "python") -> str:
+        from foundry.utils.language_config import get_language_config
+        lang_config = get_language_config(language)
+        ext = lang_config["extension"]
+        lang_name = lang_config["name"].title()
+
+        system_prompt = (
+            f"You are an expert {lang_name} Engineer.\n"
+            f"Plan the file structure for a project based on the following architecture.\n\n"
+            f"Use {ext} extensions for source files.\n"
+            "Return ONLY a JSON list of file paths "
+            f'(e.g. ["src/main{ext}", "src/utils{ext}", "README.md"]).'
+        )
+
         user_prompt = f"Architecture:\n{architecture}"
         if prd:
             user_prompt += f"\n\nProduct Requirements (PRD):\n{prd}"
@@ -182,7 +237,7 @@ class EngineerAgent(Agent):
     def _parse_file_list(self, response_content: str) -> List[str]:
         """
         Parses the Architect's file structure output into a flat list of paths.
-        Enforces .py extensions recursively.
+        Language-aware: only renames extensions for Python projects.
         """
         try:
             # Cleanup and parse
@@ -196,22 +251,9 @@ class EngineerAgent(Agent):
             # RECURSIVE FLATTENING: Ensure we catch nested files like src/components/App.js
             flat_paths = self._flatten_file_structure(raw_structure)
             
-            # FORCE PYTHON EXTENSIONS: Multi-pass hardening
-            clean_files = []
-            for f in flat_paths:
-                f_stripped = f.strip()
-                # Check for common JS/TS/Other extensions (case-insensitive)
-                if any(f_stripped.lower().endswith(ext) for ext in ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs']):
-                    # Replace with .py
-                    base = os.path.splitext(f_stripped)[0]
-                    clean_files.append(base + ".py")
-                else:
-                    clean_files.append(f_stripped)
-            
-            return clean_files
+            return [f.strip() for f in flat_paths if f.strip()]
         except Exception as e:
             print(f"Error parsing file list: {e}. Falling back to default.")
-            # Fallback - ensure .py extensions
             return ["main.py", "requirements.txt", "README.md"]
 
     def _flatten_file_structure(self, structure: Any, current_path: str = "") -> List[str]:
@@ -243,10 +285,10 @@ class EngineerAgent(Agent):
         # Deduplicate and normalize
         return list(set(p.replace("\\", "/") for p in paths if p))
 
-    def _detect_language(self, architecture_content: str) -> str:
-        """
-        Hardened language detection: Always returns 'python'.
-        """
+    def _detect_language(self, architecture_content: str, graph_state_language: str = "") -> str:
+        """Detect language from GraphState first, then fall back to architecture content."""
+        if graph_state_language and graph_state_language.strip():
+            return graph_state_language.lower().strip()
         return "python"
 
     async def _generate_file_content(
@@ -259,7 +301,8 @@ class EngineerAgent(Agent):
         requirements: str = "", # Fix L
         fix_instructions: str = "",
         existing_version: str = None,
-        project_id: str = "current"
+        project_id: str = "current",
+        kg_project_summary: str = "",
     ) -> str:
         """
         Generate file content with coding standards and security measures.
@@ -321,7 +364,7 @@ class EngineerAgent(Agent):
             coding_standard, 
             prd, 
             requirements, # Fix L
-            context_str, 
+            context_str + kg_project_summary, 
             fix_instructions, 
             existing_version
         )
@@ -345,21 +388,11 @@ class EngineerAgent(Agent):
         
         return clean_content
 
-    async def _recover_with_python_force(self, filename: str, dirty_code: str, architecture: str) -> str:
-        """
-        Force recovery of a file if JS was generated instead of Python.
-        """
-        system_prompt = """CRITICAL: You just generated JavaScript code, but this project is STRICTLY PYTHON ONLY.
-        You MUST rewrite the provided functionality using Python 3.11+.
-        Use FastAPI or Flask for web logic. Use standard Python libraries.
-        NO Node.js, NO express, NO require, NO const.
-        Return ONLY the corrected Python code.
-        """
-        user_prompt = f"File: {filename}\nArchitecture Rationale: {architecture}\n\nDirty JS Code to port to Python:\n{dirty_code}"
-        messages = [
-            LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=user_prompt)
-        ]
+    async def _recover_with_correct_language(self, filename: str, dirty_code: str, architecture: str, target_language: str = "python") -> str:
+        """Recover a file generated in the wrong language using Language_Guards."""
+        from foundry.utils.language_guards import recover_prompt
+        prompt = recover_prompt(filename, dirty_code, target_language, architecture)
+        messages = [LLMMessage(role="user", content=prompt)]
         response = await self.llm.generate(messages, temperature=0.1)
         return self._clean_code(response.content)
     
@@ -471,16 +504,15 @@ class EngineerAgent(Agent):
         
         improvements_needed = "\n".join([f"- {issue_descriptions.get(issue, issue)}" for issue in issues])
         
-        system_prompt = """You are a Python Quality Expert. 
+        coding_standard = self.CODING_STANDARDS.get(language, "industry best practices")
+        system_prompt = f"""You are an expert {language.title()} Quality Engineer.
         Improve the provided code based on the instructions.
-        
-        ABSOLUTE REQUIREMENT: You MUST implement improvements using ONLY Python 3.11+.
-        PROHIBITED: Do NOT use any JavaScript, Node, or web-framework syntax.
+        Follow {coding_standard} standards.
         
         Return ONLY the updated code without any explanations.
         """
         
-        user_prompt = f"File: {filename}\nLanguage: {language}\n\nCode:\n{code}"
+        user_prompt = f"File: {filename}\nLanguage: {language}\n\nImprovements needed:\n{improvements_needed}\n\nCode:\n{code}"
         
         messages = [
             LLMMessage(role="system", content=system_prompt),
@@ -524,6 +556,8 @@ class EngineerAgent(Agent):
         Extract import statements from code.
         """
         imports = []
+        if not code:
+            return imports
         
         # Python imports
         if filename.endswith('.py'):

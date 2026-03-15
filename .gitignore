@@ -45,6 +45,7 @@ ENV/
 .coverage
 htmlcov/
 .hypothesis/
+.kiro/
 
 # Logs
 *.log
@@ -77,3 +78,4 @@ temp/
 sandbox/
 
 generated_projects/
+archive/

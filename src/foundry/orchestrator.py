@@ -41,6 +41,8 @@ class GraphState(TypedDict):
     project_id: str  # UUID string for DB persistence
     reflexion_count: int  # tracks how many review→reflexion cycles have occurred
     success_flag: bool  # tracks if the code was successfully deployed
+    language: str  # project language, e.g. "python", "javascript", "java"
+    framework: str  # project framework, e.g. "fastapi", "express", "spring"
 
 
 class AgentOrchestrator:
@@ -133,8 +135,9 @@ class AgentOrchestrator:
         return {
             "messages": [AIMessage(content=f"PRD generated:\n{prd}")],
             "project_context": {
+                **state["project_context"],
                 "prd": prd,
-                "requirements": state.get("requirements", "") # Persist for next nodes
+                "requirements": state.get("requirements", "")
             }
         }
 
@@ -150,7 +153,9 @@ class AgentOrchestrator:
             message_type=MessageType.TASK,
             payload={
                 "prd": prd,
-                "requirements": requirements
+                "requirements": requirements,
+                "language": state.get("language", "python"),
+                "framework": state.get("framework", ""),
             }
         )
         
@@ -169,9 +174,10 @@ class AgentOrchestrator:
         return {
             "messages": [AIMessage(content=f"Architecture designed:\n{architecture}")],
             "project_context": {
-                "architecture": architecture, 
+                **state["project_context"],
+                "architecture": architecture,
                 "prd": prd,
-                "requirements": state.get("requirements", "") # Persist for next nodes
+                "requirements": state.get("requirements", "")
             }
         }
 
@@ -189,11 +195,13 @@ class AgentOrchestrator:
         payload = {
             "architecture": architecture,
             "prd": prd,
-            "requirements": state.get("requirements", ""), # Fix L
+            "requirements": state.get("requirements", ""),
             "fix_instructions": reflexion_feedback,
             "existing_code": existing_code,
             "project_id": state["project_id"],
-            "entry_point": "main.py"
+            "entry_point": "main.py",
+            "language": state.get("language", "python"),
+            "framework": state.get("framework", ""),
         }
         
         message = AgentMessage(
@@ -231,43 +239,33 @@ class AgentOrchestrator:
 
         return {
             "messages": [AIMessage(content=f"Code generated for {len(code_repo)} files.")],
-            "project_context": {"code_repo": code_repo, "architecture": architecture, "prd": prd}
+            "project_context": {**state["project_context"], "code_repo": code_repo, "architecture": architecture, "prd": prd}
         }
 
     async def _code_review_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Code Review agent."""
         await self._update_project_status(state["project_id"], ProjectStatus.running_code_review)
-        
+
         code_repo = state["project_context"].get("code_repo", {})
-        
+        language = state.get("language", "python")
+
         message = AgentMessage(
             sender=AgentType.ENGINEER,
             recipient=AgentType.CODE_REVIEW,
             message_type=MessageType.TASK,
             payload={
                 "code_repo": code_repo,
-                "project_id": state["project_id"]
+                "project_id": state["project_id"],
+                "language": language,
             }
         )
-        
+
         response = await self.code_review_agent.process_message(message)
         review_results = response.payload if response else {"status": "REJECTED", "feedback": "Review failed"}
-        
-        # Bridge status/approved fields for LangGraph routing
-        is_approved = review_results.get("status") == "APPROVED"
-        
-        # FAIL-SAFE: Re-verify that no JS leaked into an "APPROVED" review
-        if is_approved:
-            patterns = ["const ", "require(", "import React", "express()", "module.exports", "export default"]
-            for file_path, content in code_repo.items():
-                if any(p in content for p in patterns):
-                    is_approved = False
-                    review_results["status"] = "REJECTED"
-                    review_results["feedback"] = "REVIEWER FAIL-SAFE: JS leakage detected in approved repo. Rejecting for Python rewrite."
-                    break
 
+        is_approved = review_results.get("status") == "APPROVED"
         review_results["approved"] = is_approved
-        
+
         # Store review as artifact
         await self._store_artifact(
             state["project_id"],
@@ -275,7 +273,7 @@ class AgentOrchestrator:
             json.dumps(review_results, indent=2),
             ArtifactType.review
         )
-        
+
         return {
             "messages": [AIMessage(content=f"Code review completed. Status: {review_results.get('status')}")],
             "review_feedback": review_results
@@ -286,7 +284,7 @@ class AgentOrchestrator:
         await self._update_project_status(state["project_id"], ProjectStatus.running_reflexion)
         
         code_repo = state["project_context"].get("code_repo", {})
-        review_comments = state["review_feedback"].get("comments", "")
+        review_comments = state["review_feedback"].get("feedback", "")
         
         message = AgentMessage(
             sender=AgentType.CODE_REVIEW,
@@ -296,15 +294,18 @@ class AgentOrchestrator:
                 "task_type": "execute_and_fix",
                 "code_repo": code_repo,
                 "feedback": review_comments,
+                "issues": state["review_feedback"].get("issues", []),
                 "project_id": state["project_id"]
             }
         )
         
         response = await self.reflexion_agent.process_message(message)
         reflexion_fix = response.payload.get("fix_plan", "") if response else ""
+        updated_code_repo = response.payload.get("code_repo", code_repo) if response else code_repo
         
         return {
-            "messages": [AIMessage(content=f"Reflexion analysis complete. Fix plan generated.")],
+            "messages": [AIMessage(content="Reflexion analysis complete. Fix plan generated.")],
+            "project_context": {**state["project_context"], "code_repo": updated_code_repo},
             "review_feedback": {**state["review_feedback"], "reflexion_fix": reflexion_fix},
             "reflexion_count": state.get("reflexion_count", 0) + 1
         }
@@ -390,21 +391,15 @@ class AgentOrchestrator:
         # CLEANING: Strip markdown backticks for code files
         if artifact_type == ArtifactType.code:
             content = content.replace("```python", "").replace("```javascript", "").replace("```js", "").replace("```", "").strip()
-            
-            # Fix 5: Master Write-Time Gate
-            # 1. Block forbidden extensions entirely
-            forbidden_exts = ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs', '.php', '.html', '.css']
-            if any(name.lower().endswith(ext) for ext in forbidden_exts):
-                logger.critical(f"MASTER GATE BLOCKED forbidden extension: {name}. Substituting error stub.")
-                content = f"# BLOCKED: Forbidden file type {name} detected in Python project.\n"
-                # Optionally rename to .py to prevent sandbox breakage
-                if not name.endswith(".py"):
-                    name = os.path.splitext(name)[0] + ".py"
-            
-            # 2. Block JS content in Python files
-            if name.endswith(".py") and bool(self.JS_PATTERNS.search(content)):
-                logger.critical(f"FINAL GATE BLOCKED: JS leakage detected in {name}. Substituting error stub.")
-                content = f"# BLOCKED: JavaScript leakage detected during final save.\n# Manual implementation required.\n"
+
+            # For Python projects only: block forbidden extensions and JS content leakage
+            project_language = "python"  # default; will be overridden below if available
+            # We can't easily access GraphState here, so we infer from the file extension
+            # The language gate only applies when the artifact name ends with .py
+            if name.lower().endswith(".py"):
+                if bool(self.JS_PATTERNS.search(content)):
+                    logger.critical(f"FINAL GATE BLOCKED: JS leakage detected in Python file {name}. Substituting stub.")
+                    content = "# BLOCKED: JavaScript leakage detected during final save.\n# Manual implementation required.\n"
         
         # Update path after possible name change
         file_path = os.path.join(project_dir, name)
@@ -430,6 +425,21 @@ class AgentOrchestrator:
 
     async def run(self, project_id: str, initial_prompt: str):
         """Run the orchestration graph for a project."""
+        # Read language and framework from the project record
+        project_language = "python"
+        project_framework = ""
+        async with AsyncSessionLocal() as session:
+            try:
+                result = await session.execute(
+                    select(Project).where(Project.id == project_id)
+                )
+                project = result.scalar_one_or_none()
+                if project:
+                    project_language = getattr(project, "language", "python") or "python"
+                    project_framework = getattr(project, "framework", "") or ""
+            except Exception as e:
+                logger.warning(f"Could not read project language/framework: {e}")
+
         initial_state = {
             "messages": [HumanMessage(content=initial_prompt)],
             "current_agent": "product_manager",
@@ -437,7 +447,9 @@ class AgentOrchestrator:
             "review_feedback": {},
             "project_id": project_id,
             "reflexion_count": 0,
-            "success_flag": False
+            "success_flag": False,
+            "language": project_language,
+            "framework": project_framework,
         }
         
         try:

@@ -32,16 +32,20 @@ class RateLimitMiddleware:
         client_host = scope.get("client", ["", 0])[0]
         identifier = api_key if api_key else client_host
         
-        # Check rate limit (do this for all requests to get remaining/reset headers)
-        is_allowed, remaining, reset_time = await self._check_rate_limit(
-            identifier,
-            self.default_limit,
-            self.window_seconds,
-        )
-        
         # Check if this path should bypass rate limit enforcement
         path = scope.get("path", "")
         is_bypassed = path in ["/health", "/", "/docs", "/openapi.json"]
+
+        # Check rate limit (do this for all requests to get remaining/reset headers)
+        try:
+            is_allowed, remaining, reset_time = await self._check_rate_limit(
+                identifier,
+                self.default_limit,
+                self.window_seconds,
+            )
+        except Exception:
+            # Redis unavailable — allow the request through
+            is_allowed, remaining, reset_time = True, self.default_limit, time.time() + self.window_seconds
         
         if not is_allowed and not is_bypassed:
             wait_time = int(reset_time - time.time())

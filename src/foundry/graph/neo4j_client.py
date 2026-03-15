@@ -92,6 +92,11 @@ class Neo4jClient:
             "CREATE CONSTRAINT function_id IF NOT EXISTS FOR (f:Function) REQUIRE f.id IS UNIQUE",
             "CREATE CONSTRAINT class_id IF NOT EXISTS FOR (c:Class) REQUIRE c.id IS UNIQUE",
             "CREATE CONSTRAINT module_id IF NOT EXISTS FOR (m:Module) REQUIRE m.id IS UNIQUE",
+            # New node type constraints (Req 13.5)
+            "CREATE CONSTRAINT requirement_id IF NOT EXISTS FOR (r:Requirement) REQUIRE r.id IS UNIQUE",
+            "CREATE CONSTRAINT architecture_decision_id IF NOT EXISTS FOR (a:ArchitectureDecision) REQUIRE a.id IS UNIQUE",
+            "CREATE CONSTRAINT pattern_id IF NOT EXISTS FOR (p:Pattern) REQUIRE p.id IS UNIQUE",
+            "CREATE CONSTRAINT error_fix_id IF NOT EXISTS FOR (e:ErrorFix) REQUIRE e.id IS UNIQUE",
             
             # Indexes for performance
             "CREATE INDEX project_name IF NOT EXISTS FOR (p:Project) ON (p.name)",

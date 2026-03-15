@@ -211,6 +211,8 @@ async def create_project(
         description=request.description,
         requirements=request.requirements,
         status=ProjectStatus.created,
+        language=request.language or "python",
+        framework=request.framework,
     )
 
     db.add(project)

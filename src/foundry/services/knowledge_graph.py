@@ -485,6 +485,158 @@ class KnowledgeGraphService:
         """Clear all data for a project."""
         await self.client.clear_project(project_id)
 
+    # -------------------------------------------------------------------------
+    # New node store methods (Req 13.1–13.4)
+    # -------------------------------------------------------------------------
+
+    async def store_requirement(
+        self,
+        project_id: str,
+        text: str,
+        source_agent: str,
+    ) -> None:
+        """Store a Requirement node linked to the project. Never raises."""
+        try:
+            query = """
+            MATCH (p:Project {id: $project_id})
+            CREATE (r:Requirement {
+                id: $id,
+                project_id: $project_id,
+                text: $text,
+                source_agent: $source_agent,
+                created_at: datetime()
+            })
+            CREATE (p)-[:CONTAINS]->(r)
+            """
+            await self.client.execute_write(
+                query,
+                {
+                    "id": str(uuid4()),
+                    "project_id": project_id,
+                    "text": text,
+                    "source_agent": source_agent,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"store_requirement failed (non-blocking): {e}")
+
+    async def store_architecture_decision(
+        self,
+        project_id: str,
+        title: str,
+        decision: str,
+        rationale: str,
+        language: str,
+        framework: str,
+    ) -> None:
+        """Store an ArchitectureDecision node linked to the project. Never raises."""
+        try:
+            query = """
+            MATCH (p:Project {id: $project_id})
+            CREATE (a:ArchitectureDecision {
+                id: $id,
+                project_id: $project_id,
+                title: $title,
+                decision: $decision,
+                rationale: $rationale,
+                language: $language,
+                framework: $framework,
+                created_at: datetime()
+            })
+            CREATE (p)-[:CONTAINS]->(a)
+            """
+            await self.client.execute_write(
+                query,
+                {
+                    "id": str(uuid4()),
+                    "project_id": project_id,
+                    "title": title,
+                    "decision": decision,
+                    "rationale": rationale,
+                    "language": language,
+                    "framework": framework,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"store_architecture_decision failed (non-blocking): {e}")
+
+    async def store_pattern(
+        self,
+        project_id: str,
+        name: str,
+        description: str,
+        language: str,
+        code_snippet: str,
+    ) -> None:
+        """Store a Pattern node linked to the project. Never raises."""
+        try:
+            query = """
+            MATCH (p:Project {id: $project_id})
+            CREATE (pt:Pattern {
+                id: $id,
+                project_id: $project_id,
+                name: $name,
+                description: $description,
+                language: $language,
+                code_snippet: $code_snippet,
+                created_at: datetime()
+            })
+            CREATE (p)-[:CONTAINS]->(pt)
+            """
+            await self.client.execute_write(
+                query,
+                {
+                    "id": str(uuid4()),
+                    "project_id": project_id,
+                    "name": name,
+                    "description": description,
+                    "language": language,
+                    "code_snippet": code_snippet,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"store_pattern failed (non-blocking): {e}")
+
+    async def store_error_fix(
+        self,
+        project_id: str,
+        error_type: str,
+        error_message: str,
+        fix_description: str,
+        fixed_code: str,
+        language: str,
+    ) -> None:
+        """Store an ErrorFix node linked to the project. Never raises."""
+        try:
+            query = """
+            MATCH (p:Project {id: $project_id})
+            CREATE (ef:ErrorFix {
+                id: $id,
+                project_id: $project_id,
+                error_type: $error_type,
+                error_message: $error_message,
+                fix_description: $fix_description,
+                fixed_code: $fixed_code,
+                language: $language,
+                created_at: datetime()
+            })
+            CREATE (p)-[:CONTAINS]->(ef)
+            """
+            await self.client.execute_write(
+                query,
+                {
+                    "id": str(uuid4()),
+                    "project_id": project_id,
+                    "error_type": error_type,
+                    "error_message": error_message,
+                    "fix_description": fix_description,
+                    "fixed_code": fixed_code,
+                    "language": language,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"store_error_fix failed (non-blocking): {e}")
+
 
 # Global Knowledge Graph service instance
 knowledge_graph_service = KnowledgeGraphService()

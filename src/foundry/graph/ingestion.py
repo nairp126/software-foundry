@@ -22,6 +22,26 @@ class IngestionPipeline:
         """Lazy load the knowledge graph service to prevent circular imports."""
         from foundry.services.knowledge_graph import knowledge_graph_service
         return knowledge_graph_service
+
+    def _get_parser(self, file_path: str):
+        """Route a file to the correct parser by extension.
+
+        Returns None (and logs a debug message) for unknown extensions.
+        """
+        from foundry.graph.js_parser import js_parser
+        from foundry.graph.java_parser import java_parser
+
+        ext = Path(file_path).suffix.lower()
+        parser_map = {
+            ".py": self.parser,
+            ".js": js_parser,
+            ".ts": js_parser,
+            ".java": java_parser,
+        }
+        parser = parser_map.get(ext)
+        if parser is None:
+            self.logger.debug(f"No parser registered for extension '{ext}', skipping {file_path}")
+        return parser
     
     async def ingest_project(
         self,
@@ -29,6 +49,7 @@ class IngestionPipeline:
         project_name: str,
         project_path: str,
         metadata: Optional[Dict[str, Any]] = None,
+        language: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Ingest an entire project into the Knowledge Graph."""
         self.logger.info(f"Starting ingestion for project: {project_name}")
@@ -50,8 +71,38 @@ class IngestionPipeline:
                 metadata=metadata or {}
             )
             
-            # Parse all Python files
-            parsed_modules = self.parser.parse_directory(project_path)
+            # Collect all files to parse using language-aware routing
+            directory_path = Path(project_path)
+            exclude_patterns = [
+                "venv", "env", ".venv", "__pycache__", ".git", "node_modules",
+                "build", "dist", ".pytest_cache", ".mypy_cache"
+            ]
+
+            # Determine which extensions to scan
+            if language and language.lower() in ("javascript", "typescript"):
+                glob_patterns = ["**/*.js", "**/*.ts"]
+            elif language and language.lower() == "java":
+                glob_patterns = ["**/*.java"]
+            else:
+                # Default: Python (plus any other supported extension via _get_parser)
+                glob_patterns = ["**/*.py", "**/*.js", "**/*.ts", "**/*.java"]
+
+            candidate_files = []
+            for pattern in glob_patterns:
+                for f in directory_path.rglob(pattern.lstrip("**/")):
+                    if not any(ex in str(f) for ex in exclude_patterns):
+                        candidate_files.append(str(f))
+
+            # Parse each file with the correct parser
+            parsed_modules: Dict[str, ParsedModule] = {}
+            for file_path in candidate_files:
+                parser = self._get_parser(file_path)
+                if parser is None:
+                    continue
+                parsed = parser.parse_file(file_path)
+                if parsed:
+                    parsed_modules[file_path] = parsed
+
             stats["files_processed"] = len(parsed_modules)
             
             # Create a mapping of file paths to module IDs

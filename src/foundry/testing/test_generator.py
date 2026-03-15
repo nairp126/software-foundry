@@ -15,6 +15,9 @@ class TestFramework(Enum):
     """Supported test frameworks by language."""
 
     PYTEST = "pytest"
+    JEST = "jest"
+    VITEST = "vitest"
+    JUNIT = "junit"
 
 
 @dataclass
@@ -32,7 +35,10 @@ class TestGenerator:
     """Generates automated tests for code with coverage analysis."""
 
     FRAMEWORK_MAP = {
-        "python": TestFramework.PYTEST
+        "python": TestFramework.PYTEST,
+        "javascript": TestFramework.JEST,
+        "typescript": TestFramework.VITEST,
+        "java": TestFramework.JUNIT,
     }
 
     COVERAGE_THRESHOLD = 80.0
@@ -43,23 +49,13 @@ class TestGenerator:
         self.llm: BaseLLMProvider = LLMProviderFactory.create_provider("ollama", model_name)
 
     def select_framework(self, language: str, tech_stack: Optional[Dict] = None) -> TestFramework:
-        """Select appropriate test framework based on language and tech stack.
-
-        Args:
-            language: Programming language (python, javascript, typescript, java)
-            tech_stack: Optional technology stack details
-
-        Returns:
-            TestFramework enum value
-        """
+        """Select appropriate test framework based on language and tech stack."""
         language = language.lower()
 
         # Check tech stack for specific preferences
         if tech_stack:
             if "vite" in str(tech_stack).lower() or "vitest" in str(tech_stack).lower():
                 return TestFramework.VITEST
-            if "mocha" in str(tech_stack).lower():
-                return TestFramework.MOCHA
 
         # Default framework selection
         return self.FRAMEWORK_MAP.get(language, TestFramework.PYTEST)
@@ -126,6 +122,27 @@ Framework-specific guidelines:
 - Use pytest.mark for test categorization
 - Use pytest.raises for exception testing
 - Follow pytest naming conventions (test_*.py)
+""",
+            TestFramework.JEST: """
+Framework-specific guidelines:
+- Use describe/it blocks for test organization
+- Use beforeEach/afterEach for setup/teardown
+- Use expect(...).toBe / toEqual for assertions
+- Mock modules with jest.mock()
+""",
+            TestFramework.VITEST: """
+Framework-specific guidelines:
+- Use describe/it blocks for test organization
+- Use beforeEach/afterEach for setup/teardown
+- Use expect(...).toBe / toEqual for assertions
+- Import from 'vitest': import { describe, it, expect } from 'vitest'
+""",
+            TestFramework.JUNIT: """
+Framework-specific guidelines:
+- Annotate test methods with @Test
+- Use @BeforeEach / @AfterEach for setup/teardown
+- Use Assertions.assertEquals / assertTrue
+- Class name must end with 'Test'
 """,
         }
         return instructions.get(framework, "")
@@ -232,17 +249,24 @@ Be realistic about coverage estimation."""
             framework: Test framework being used
 
         Returns:
-            Test filename following framework conventions
+            Test filename following framework conventions:
+            - pytest:  test_{stem}.py
+            - jest:    {stem}.test.js
+            - vitest:  {stem}.test.ts
+            - junit:   {Stem}Test.java  (PascalCase stem)
         """
         path = Path(source_filename)
         stem = path.stem
-        suffix = path.suffix
 
-        if framework in [TestFramework.PYTEST]:
-            return f"test_{stem}{suffix}"
-        elif framework in [TestFramework.JEST, TestFramework.VITEST, TestFramework.MOCHA]:
-            return f"{stem}.test{suffix}"
+        if framework == TestFramework.PYTEST:
+            return f"test_{stem}.py"
+        elif framework == TestFramework.JEST:
+            return f"{stem}.test.js"
+        elif framework == TestFramework.VITEST:
+            return f"{stem}.test.ts"
         elif framework == TestFramework.JUNIT:
-            return f"{stem}Test{suffix}"
+            pascal_stem = stem[0].upper() + stem[1:] if stem else stem
+            return f"{pascal_stem}Test.java"
 
-        return f"test_{stem}{suffix}"
+        # Fallback
+        return f"test_{stem}{path.suffix}"

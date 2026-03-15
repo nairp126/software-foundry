@@ -73,7 +73,8 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app/src
-      - ./generated_projects:/app/generated_projects
+      - generated_projects:/app/generated_projects
+      - logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -102,7 +103,8 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app/src
-      - ./generated_projects:/app/generated_projects
+      - generated_projects:/app/generated_projects
+      - logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock
     command: celery -A foundry.celery_app worker --loglevel=info
 
@@ -110,3 +112,5 @@ volumes:
   postgres_data:
   redis_data:
   neo4j_data:
+  generated_projects: {}
+  logs: {}

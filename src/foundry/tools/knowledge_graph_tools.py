@@ -287,17 +287,7 @@ class KnowledgeGraphTools:
         self,
         project_id: str
     ) -> List[Dict[str, Any]]:
-        """Get a lightweight map of all files and their exported symbols.
-        
-        This gives the engineer a 'table of contents' of what already exists
-        without needing the full source code of every file.
-        
-        Args:
-            project_id: Project identifier
-            
-        Returns:
-            List of file summaries with their exported symbols
-        """
+        """Get a lightweight map of all files and their exported symbols."""
         query = """
         MATCH (project:Project {project_id: $project_id})
         MATCH (project)-[:CONTAINS*]->(m:Module)
@@ -314,6 +304,143 @@ class KnowledgeGraphTools:
             return [dict(record) for record in results]
         except Exception:
             return []
+
+    # -------------------------------------------------------------------------
+    # New GraphRAG query methods (Req 14.1–14.5)
+    # -------------------------------------------------------------------------
+
+    async def get_similar_error_fixes(
+        self,
+        error_type: str,
+        language: str,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Return ErrorFix nodes matching error_type and language. Never raises."""
+        try:
+            query = """
+            MATCH (ef:ErrorFix)
+            WHERE ef.error_type = $error_type AND ef.language = $language
+            RETURN ef.id as id, ef.project_id as project_id,
+                   ef.error_type as error_type, ef.error_message as error_message,
+                   ef.fix_description as fix_description, ef.fixed_code as fixed_code,
+                   ef.language as language
+            ORDER BY ef.created_at DESC
+            LIMIT $limit
+            """
+            results = await self.kg_service.client.execute_query(
+                query,
+                {"error_type": error_type, "language": language, "limit": limit},
+            )
+            return results
+        except Exception as e:
+            self.kg_service.client.logger.warning(f"get_similar_error_fixes failed: {e}")
+            return []
+
+    async def get_successful_patterns(
+        self,
+        language: str,
+        framework: str,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Return Pattern nodes for the given language and framework. Never raises."""
+        try:
+            query = """
+            MATCH (pt:Pattern)
+            WHERE pt.language = $language AND pt.framework = $framework
+            RETURN pt.id as id, pt.project_id as project_id,
+                   pt.name as name, pt.description as description,
+                   pt.language as language, pt.code_snippet as code_snippet
+            ORDER BY pt.created_at DESC
+            LIMIT $limit
+            """
+            results = await self.kg_service.client.execute_query(
+                query,
+                {"language": language, "framework": framework, "limit": limit},
+            )
+            return results
+        except Exception as e:
+            self.kg_service.client.logger.warning(f"get_successful_patterns failed: {e}")
+            return []
+
+    async def get_architecture_context(
+        self,
+        project_id: str,
+    ) -> Dict[str, Any]:
+        """Return all ArchitectureDecision nodes for a project. Never raises."""
+        try:
+            query = """
+            MATCH (a:ArchitectureDecision {project_id: $project_id})
+            RETURN a.id as id, a.title as title, a.decision as decision,
+                   a.rationale as rationale, a.language as language,
+                   a.framework as framework
+            ORDER BY a.created_at ASC
+            """
+            results = await self.kg_service.client.execute_query(
+                query,
+                {"project_id": project_id},
+            )
+            return {"decisions": results}
+        except Exception as e:
+            self.kg_service.client.logger.warning(f"get_architecture_context failed: {e}")
+            return {"decisions": []}
+
+    async def get_project_summary_for_generation(
+        self,
+        project_id: str,
+    ) -> str:
+        """Return a formatted string combining ADRs, patterns, and requirements for LLM injection. Never raises."""
+        try:
+            # Fetch ADRs
+            adr_query = """
+            MATCH (a:ArchitectureDecision {project_id: $project_id})
+            RETURN a.title as title, a.decision as decision, a.rationale as rationale
+            ORDER BY a.created_at ASC LIMIT 5
+            """
+            adrs = await self.kg_service.client.execute_query(adr_query, {"project_id": project_id})
+
+            # Fetch patterns
+            pattern_query = """
+            MATCH (pt:Pattern {project_id: $project_id})
+            RETURN pt.name as name, pt.description as description, pt.code_snippet as code_snippet
+            ORDER BY pt.created_at DESC LIMIT 5
+            """
+            patterns = await self.kg_service.client.execute_query(pattern_query, {"project_id": project_id})
+
+            # Fetch requirements
+            req_query = """
+            MATCH (r:Requirement {project_id: $project_id})
+            RETURN r.text as text
+            ORDER BY r.created_at ASC LIMIT 10
+            """
+            requirements = await self.kg_service.client.execute_query(req_query, {"project_id": project_id})
+
+            if not adrs and not patterns and not requirements:
+                return ""
+
+            parts = ["\n\n=== KNOWLEDGE GRAPH PROJECT CONTEXT ==="]
+
+            if requirements:
+                parts.append("\nRequirements:")
+                for r in requirements:
+                    parts.append(f"  - {r.get('text', '')}")
+
+            if adrs:
+                parts.append("\nArchitecture Decisions:")
+                for a in adrs:
+                    parts.append(f"  [{a.get('title', '')}] {a.get('decision', '')} — {a.get('rationale', '')}")
+
+            if patterns:
+                parts.append("\nSuccessful Patterns:")
+                for p in patterns:
+                    snippet = (p.get("code_snippet") or "")[:200]
+                    parts.append(f"  [{p.get('name', '')}] {p.get('description', '')}\n    {snippet}")
+
+            parts.append("=== END KNOWLEDGE GRAPH CONTEXT ===\n")
+            return "\n".join(parts)
+
+        except Exception as e:
+            self.kg_service.client.logger.warning(f"get_project_summary_for_generation failed: {e}")
+            return ""
 
     def format_for_llm(self, data: Any) -> str:
         """Format knowledge graph data for LLM consumption.

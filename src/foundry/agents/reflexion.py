@@ -5,11 +5,13 @@ Implements the Execute → Analyze → Fix → Retry → Escalate workflow for c
 """
 
 from typing import Dict, Any, List, Optional
+import json
 import logging
 
 from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.base import LLMMessage
 from foundry.llm.factory import LLMProviderFactory
+from foundry.testing.quality_gates import QualityGates
 from foundry.sandbox.environment import (
     SandboxEnvironment,
     Sandbox,
@@ -246,11 +248,10 @@ class ReflexionEngine(Agent):
     ) -> List[CodeFix]:
         """Generate fixes using LLM."""
         system_prompt = """You are an expert code debugger and fixer.
-        
-        ABSOLUTE REQUIREMENT: You MUST fix the code using ONLY Python 3.11+.
-        PROHIBITED: Do NOT suggest Node.js, React, npm, or JavaScript solutions. 
-        If you detect non-Python logic, rewrite it to Python (FastAPI/Flask).
-        
+
+        Analyze the error and provide corrected code.
+        Use the same language and framework as the original code.
+
         Provide ONLY the corrected code without any explanations or markdown formatting.
         """
         
@@ -355,6 +356,33 @@ class ReflexionEngine(Agent):
             return True
         
         return False
+
+    def _apply_fix_plan_to_repo(
+        self,
+        code_repo: Dict[str, str],
+        fix_plan: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """Apply per-file patches from fix_plan to code_repo.
+        
+        fix_plan shape: {"files": {"path/to/file.py": "...full corrected content..."}}
+        Files not in fix_plan are left unchanged. Unparseable entries are skipped with a warning.
+        """
+        updated_repo = code_repo.copy()
+        files_to_patch = fix_plan.get("files", {})
+        
+        if not isinstance(files_to_patch, dict):
+            logger.warning("_apply_fix_plan_to_repo: fix_plan['files'] is not a dict, skipping patch")
+            return updated_repo
+        
+        for file_path, new_content in files_to_patch.items():
+            if not isinstance(file_path, str) or not isinstance(new_content, str):
+                logger.warning(f"_apply_fix_plan_to_repo: skipping unparseable entry for {file_path!r}")
+                continue
+            updated_repo[file_path] = new_content
+            logger.debug(f"_apply_fix_plan_to_repo: patched {file_path}")
+        
+        return updated_repo
+
     async def execute_and_fix(
         self,
         code_repo: Dict[str, str],
@@ -448,12 +476,10 @@ class ReflexionEngine(Agent):
             # For multi-file, we currently focus on the entry point or use LLM to decide
             # Simplified for now: use LLM to generate a fix plan for the repo
             system_prompt = """You are an expert code debugger.
-            Analyze the error and the project files. 
+            Analyze the error and the project files.
             Provide a fix plan to resolve the issue.
-            
-            ABSOLUTE REQUIREMENT: Use ONLY Python 3.11+.
-            PROHIBITED: No Node.js, React, or JavaScript.
-            
+            Use the same language and framework as the original code.
+
             Since you are in a self-healing loop, respond with the 'fix_plan' string only.
             """
             
@@ -524,23 +550,49 @@ class ReflexionEngine(Agent):
         
         This is kept for backward compatibility with the existing workflow.
         """
+        issues = code_review.get("issues", [])
+
+        # KG: fetch similar error fixes to enrich the prompt (Req 16.5)
+        kg_similar_fixes = ""
+        if self.kg_tools:
+            try:
+                error_type = code_review.get("error_type", "review_failure")
+                language = code_review.get("language", "python")
+                similar = await self.kg_tools.get_similar_error_fixes(error_type, language)
+                if similar:
+                    lines = ["\n\nSIMILAR PAST FIXES FROM KNOWLEDGE GRAPH:"]
+                    for fix in similar:
+                        lines.append(f"  [{fix.get('error_type')}] {fix.get('fix_description')}")
+                    kg_similar_fixes = "\n".join(lines)
+            except Exception as e:
+                logger.warning(f"get_similar_error_fixes failed (non-blocking): {e}")
+
         system_prompt = """You are a Senior Lead Developer acting as a 'Reflexion' engine.
         The Code Reviewer has REJECTED the current implementation.
         
         Your job is to:
         1. Analyze the feedback and issues reported.
-        2. Formulate a clear, step-by-step plan for the Engineer to fix the code.
+        2. Produce a JSON fix plan describing the corrected file contents.
         
-        Output your plan as a string.
+        Respond ONLY with a JSON object in this exact shape:
+        {
+          "files": {
+            "path/to/file.py": "...full corrected file content..."
+          }
+        }
+        Do not include any explanation outside the JSON.
         """
 
         user_prompt = f"""
         Original Code has been rejected.
         
-        Review Feedback:
-        {code_review}
+        Structured Issues:
+        {json.dumps(issues, indent=2)}
         
-        Please provide a fix plan.
+        Review Feedback:
+        {code_review.get("feedback", "")}
+        
+        Please provide a fix plan as JSON.
         """
 
         # KG Context Integration
@@ -558,16 +610,49 @@ class ReflexionEngine(Agent):
 
         messages = [
             LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=f"{user_prompt}{kg_context}")
+            LLMMessage(role="user", content=f"{user_prompt}{kg_context}{kg_similar_fixes}")
         ]
 
         response = await self.llm.generate(messages, temperature=0.5)
-        
+
+        # Parse the LLM response as structured fix_plan JSON
+        try:
+            fix_plan_dict = json.loads(response.content)
+            if not isinstance(fix_plan_dict, dict):
+                raise ValueError("fix_plan is not a dict")
+        except Exception as e:
+            logger.warning(f"reflect_on_feedback: failed to parse fix_plan JSON: {e}")
+            fix_plan_dict = {"files": {}}
+
+        updated_repo = self._apply_fix_plan_to_repo(original_code, fix_plan_dict)
+
+        # KG: store the error fix for future retrieval (Req 16.2)
+        if self.kg_tools and fix_plan_dict.get("files"):
+            try:
+                from foundry.services.knowledge_graph import knowledge_graph_service
+                error_type = code_review.get("error_type", "review_failure")
+                language = code_review.get("language", "python")
+                project_id = code_review.get("project_id", "current")
+                fixed_snippet = next(iter(fix_plan_dict["files"].values()), "")[:500]
+                await knowledge_graph_service.store_error_fix(
+                    project_id=project_id,
+                    error_type=error_type,
+                    error_message=code_review.get("feedback", ""),
+                    fix_description=f"Reflexion fix for {error_type}",
+                    fixed_code=fixed_snippet,
+                    language=language,
+                )
+            except Exception as e:
+                logger.warning(f"store_error_fix failed (non-blocking): {e}")
+
         return AgentMessage(
             sender=self.agent_type,
             recipient=AgentType.ENGINEER,
             message_type=MessageType.TASK,
-            payload={"fix_plan": response.content}
+            payload={
+                "fix_plan": fix_plan_dict,
+                "code_repo": updated_repo,
+            }
         )
 
 

@@ -47,6 +47,10 @@ class Project(BaseModel, Base):
         doc="Approval policy for this project",
     )
 
+    # Multi-language support
+    language = Column(String(50), nullable=False, default="python", server_default="python")
+    framework = Column(String(100), nullable=True)
+
     # Agent outputs stored as JSONB for flexibility
     prd = Column(JSONB, nullable=True)
     architecture = Column(JSONB, nullable=True)

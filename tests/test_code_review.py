@@ -49,11 +49,8 @@ class TestCodeReviewAgent:
         assert response.sender == AgentType.CODE_REVIEW
         assert response.recipient == AgentType.DEVOPS
         assert response.message_type == MessageType.TASK
-        assert "review" in response.payload
-        
-        # Verify review content
-        review_data = json.loads(response.payload["review"])
-        assert review_data["status"] == "APPROVED"
+        # The payload now contains the review data directly (not nested under "review")
+        assert response.payload.get("status") == "APPROVED"
 
     @pytest.mark.asyncio
     async def test_analyze_code_approved(self, code_review_agent):
@@ -75,8 +72,8 @@ class TestCodeReviewAgent:
         response = await code_review_agent.analyze_code(code_files)
 
         assert response.message_type == MessageType.TASK
-        review_data = json.loads(response.payload["review"])
-        assert review_data["status"] == "APPROVED"
+        # The payload now contains the review data directly
+        assert response.payload.get("status") == "APPROVED"
 
     @pytest.mark.asyncio
     async def test_analyze_code_rejected(self, code_review_agent):
@@ -105,10 +102,10 @@ class TestCodeReviewAgent:
         code_files = {"config.py": "API_KEY = 'sk-123456789'"}
         response = await code_review_agent.analyze_code(code_files)
 
-        review_data = json.loads(response.payload["review"])
-        assert review_data["status"] == "REJECTED"
-        assert len(review_data["issues"]) == 1
-        assert review_data["issues"][0]["severity"] == "CRITICAL"
+        # The payload now contains the review data directly
+        assert response.payload.get("status") == "REJECTED"
+        assert len(response.payload.get("issues", [])) == 1
+        assert response.payload["issues"][0]["severity"] == "CRITICAL"
 
     @pytest.mark.asyncio
     async def test_analyze_empty_code(self, code_review_agent):
@@ -116,6 +113,6 @@ class TestCodeReviewAgent:
         response = await code_review_agent.analyze_code({})
 
         assert response.recipient == AgentType.REFLEXION
-        review_data = json.loads(response.payload["review"])
-        assert review_data["status"] == "REJECTED"
-        assert "No code was provided" in review_data["feedback"]
+        # The payload now contains the review data directly
+        assert response.payload.get("status") == "REJECTED"
+        assert "No code was provided" in response.payload.get("feedback", "")

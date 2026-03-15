@@ -41,14 +41,14 @@ class TestEngineerAgentCodeQuality:
     
     def test_detect_language_javascript(self, engineer_agent):
         """Test language detection for JavaScript projects."""
-        architecture = "Build a Node.js Express application with React frontend"
-        language = engineer_agent._detect_language(architecture)
+        # _detect_language reads from graph_state_language first (Req 11.1)
+        language = engineer_agent._detect_language("", graph_state_language="javascript")
         assert language == "javascript"
     
     def test_detect_language_typescript(self, engineer_agent):
         """Test language detection for TypeScript projects."""
-        architecture = "Build a NestJS application with TypeScript"
-        language = engineer_agent._detect_language(architecture)
+        # _detect_language reads from graph_state_language first (Req 11.1)
+        language = engineer_agent._detect_language("", graph_state_language="typescript")
         assert language == "typescript"
     
     def test_detect_language_default(self, engineer_agent):
@@ -204,7 +204,11 @@ requests>=2.31.0
             metadata={}
         ))
         
-        await engineer_agent._generate_file_content("test.py", "Build a secure API", "python")
+        await engineer_agent._generate_file_content(
+            "test.py",           # filename
+            "Build a secure API", # architecture
+            "python",            # language
+        )
         
         # Verify the system prompt includes security requirements
         call_args = engineer_agent.llm.generate.call_args
@@ -260,15 +264,8 @@ def get_api_key():
     @pytest.mark.asyncio
     async def test_generate_code_includes_integration_report(self, engineer_agent):
         """Test that generate_code includes integration report in response."""
-        engineer_agent.llm.generate = AsyncMock(return_value=LLMResponse(
-            content='["main.py"]',
-            model="qwen2.5-coder:7b",
-            tokens_used=150,
-            finish_reason="stop",
-            metadata={}
-        ))
-        
-        # Mock subsequent calls for file content
+        # Mock subsequent calls for file structure planning and file content generation
+        engineer_agent.llm.generate = AsyncMock()
         engineer_agent.llm.generate.side_effect = [
             LLMResponse(content='["main.py"]', model="qwen2.5-coder:7b", tokens_used=50, finish_reason="stop", metadata={}),
             LLMResponse(content='def main(): pass', model="qwen2.5-coder:7b", tokens_used=100, finish_reason="stop", metadata={})

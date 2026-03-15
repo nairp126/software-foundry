@@ -12,6 +12,16 @@ class ArchitectAgent(Agent):
     Architect Agent responsible for system design and technology selection.
     """
 
+    def _normalize_json(self, content: str) -> str:
+        """Strip markdown fences and trailing commas before JSON parsing."""
+        # Strip markdown fences
+        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", content.strip(), flags=re.MULTILINE)
+        stripped = re.sub(r"\s*```$", "", stripped.strip(), flags=re.MULTILINE)
+        stripped = stripped.strip()
+        # Remove trailing commas before } or ]
+        stripped = re.sub(r",\s*([}\]])", r"\1", stripped)
+        return stripped
+
     def __init__(self, model_name: Optional[str] = None):
         model_name = model_name or settings.ollama_model_name
         super().__init__(AgentType.ARCHITECT, model_name)
@@ -27,77 +37,99 @@ class ArchitectAgent(Agent):
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         if message.message_type == MessageType.TASK:
             prd = message.payload.get("prd", "")
-            requirements = message.payload.get("requirements", "") # Fix L
+            requirements = message.payload.get("requirements", "")
+            language = message.payload.get("language", "python")
+            framework = message.payload.get("framework", "")
             if not prd:
                 return None
-            return await self.design_architecture(prd, requirements)
+            return await self.design_architecture(prd, requirements, language, framework)
         return None
 
-    async def design_architecture(self, prd_content: str, requirements: str = "") -> AgentMessage:
+    async def design_architecture(self, prd_content: str, requirements: str = "", language: str = "python", framework: str = "") -> AgentMessage:
         """
         Design system architecture based on PRD.
         """
-        # Fix L: System-level Grounding
+        from foundry.utils.language_config import get_language_config
+        lang_config = get_language_config(language)
+        lang_name = lang_config["name"].title()
+        web_framework = framework or lang_config["web_framework"]
+        coding_standard = lang_config["coding_standard"]
+
         grounding_anchor = f"\nABSOLUTE DOMAIN: {requirements}\n" if requirements else ""
-        system_prompt = f"""You are an expert System Architect.{grounding_anchor}
-        Your goal is to design a robust, scalable system architecture based on the provided Product Requirements Document (PRD).
-
-        ABSOLUTE SYSTEM REQUIREMENT: You are a PYTHON-ONLY ARCHITECT. 
-        YOU ARE PROHIBITED FROM SUGGESTING ANY NON-PYTHON TECHNOLOGIES.
-
-        MANDATORY TECH STACK (ONLY USE THESE):
-        - Backend: FastAPI, Flask, or Django (Python 3.11+)
-        - Web Server: Uvicorn or Gunicorn
-        - Database: PostgreSQL, Redis, or DynamoDB (using Python clients like boto3 or psycopg2)
-        - UI/Frontend: If UI is needed, suggest Jinja2 templates, HTMX, or server-side rendering logic in Python.
-
-        STRICTLY PROHIBITED (DO NOT USE):
-        - NO Node.js, NO Express.
-        - NO React, NO Vue, NO Angular.
-        - NO NPM, NO Yarn.
-        - NO JavaScript or TypeScript libraries.
-
-        The Architecture Design should include:
-        1. High-Level Architecture (Monolith vs Microservices, Client/Server)
-        2. Technology Stack Selection (Must be strictly Python-based)
-        3. Database Schema Design (Entities and Relationships)
-        4. API Interface Definition (Endpoints)
-        5. File Structure (Must use strictly .py extensions)
-
-        Return the result as a JSON object.
-        """
+        system_prompt = (
+            f"You are an expert {lang_name} System Architect.{grounding_anchor}\n"
+            f"Design a robust, scalable system architecture based on the provided PRD.\n\n"
+            f"Target language: {lang_name}\n"
+            f"Preferred framework: {web_framework}\n"
+            f"Coding standard: {coding_standard}\n\n"
+            "The Architecture Design should include:\n"
+            "1. High-Level Architecture (Monolith vs Microservices, Client/Server)\n"
+            "2. Technology Stack Selection (use the target language and framework above)\n"
+            "3. Database Schema Design (Entities and Relationships)\n"
+            "4. API Interface Definition (Endpoints)\n"
+            f"5. File Structure (use {lang_config['extension']} extensions for source files)\n\n"
+            "Return the result as a JSON object."
+        )
 
         messages = [
             LLMMessage(role="system", content=system_prompt),
             LLMMessage(role="user", content=f"Design the architecture for the following PRD:\n\n{prd_content}")
         ]
 
-        # MULTI-PASS VALIDATION: Ensure the architecture is strictly Pythonic
-        valid_architecture = False
-        attempts = 0
+        # Two-pass validation: self-correct once if the output looks wrong, then validate again
         architecture_content = ""
-        
-        while not valid_architecture and attempts < 2:
-            attempts += 1
+        for attempt in range(2):
             response = await self.llm.generate(messages, temperature=0.2)
             architecture_content = response.content
-            
-            if not self._is_non_python_stack(architecture_content):
-                valid_architecture = True
-            else:
-                print(f"CRITICAL: Non-Python architecture detected (Attempt {attempts}). Triggering Self-Correction...")
-                # Update messages for correction pass
-                correction_prompt = f"CRITICAL ERROR: You suggested a non-Python tech stack. REWRITE this design to be 100% PYTHON (FastAPI/Flask/SQL). ABSOLUTELY NO Node, React, or JS.\n\nInvalid Design:\n{architecture_content}"
-                messages.append(LLMMessage(role="assistant", content=architecture_content))
-                messages.append(LLMMessage(role="user", content=correction_prompt))
+            normalized = self._normalize_json(architecture_content)
+            # Second pass: validate the corrected output before returning
+            if attempt == 1:
+                # Final validation — try to parse; fall back to language-aware fallback if still broken
+                try:
+                    json.loads(normalized)
+                    architecture_content = normalized
+                except json.JSONDecodeError:
+                    architecture_content = self._language_fallback_architecture(prd_content, language, lang_name, web_framework)
+                break
+            # Check if the architecture looks reasonable (non-empty JSON-ish)
+            if normalized.startswith("{"):
+                try:
+                    json.loads(normalized)
+                    architecture_content = normalized
+                    break
+                except json.JSONDecodeError:
+                    pass
+            # Trigger self-correction
+            messages.append(LLMMessage(role="assistant", content=architecture_content))
+            messages.append(LLMMessage(
+                role="user",
+                content=(
+                    f"The previous response was not valid JSON. "
+                    f"Please rewrite the architecture as a valid JSON object for a "
+                    f"{lang_name} project using {web_framework}."
+                )
+            ))
 
-        # Final Hard-Fail: If still JS after attempts, use fallback
-        if not valid_architecture:
-            print("Architect Self-Correction failed. Using Hardened Python Fallback Template.")
-            architecture_content = self._python_fallback_architecture(prd_content)
+        # Only apply sanitization for Python projects (non-Python projects keep their terms)
+        if language.lower() == "python":
+            architecture_content = self._sanitize_architecture_for_engineer(architecture_content)
 
-        # Fix 1: Final sanitization pass to translate any remaining terms
-        architecture_content = self._sanitize_architecture_for_engineer(architecture_content)
+        # KG: store architecture decision (Req 16.3)
+        if self.kg_tools:
+            try:
+                from foundry.services.knowledge_graph import knowledge_graph_service
+                project_id = prd_content[:36] if len(prd_content) >= 36 else "unknown"
+                await knowledge_graph_service.store_architecture_decision(
+                    project_id=project_id,
+                    title=f"Architecture for {lang_name} project",
+                    decision=architecture_content[:500],
+                    rationale=f"Generated by ArchitectAgent using {web_framework}",
+                    language=language,
+                    framework=web_framework,
+                )
+            except Exception as e:
+                import logging as _log
+                _log.getLogger(__name__).warning(f"store_architecture_decision failed (non-blocking): {e}")
 
         return AgentMessage(
             sender=self.agent_type,
@@ -107,34 +139,11 @@ class ArchitectAgent(Agent):
         )
 
     def _is_non_python_stack(self, content: str) -> bool:
-        """Checks if the architecture contains forbidden technologies."""
-        forbidden = ["node.js", "express.js", "react.js", "npm ", "yarn ", "mongodb", "next.js", "typescript"]
-        lower_content = content.lower()
-        return any(f in lower_content for f in forbidden)
-
-    async def _self_correct_architecture(self, dirty_arch: str, prd: str) -> str:
-        """Forces the Architect to rewrite the design using Python."""
-        system_prompt = """CRITICAL ERROR: You suggested a non-Python tech stack (Node/React/JS). 
-        You MUST rewrite this design to be 100% PYTHON-BASED.
-        - Use FastAPI or Flask for Backend.
-        - Use PostgreSQL or Redis for Database.
-        - Use Jinja2/HTMX for UI (if needed).
-        - Use strictly .py extensions.
-        - ABSOLUTELY NO JavaScript, Node, or React.
-        """
-        user_prompt = f"Original PRD:\n{prd}\n\nInvalid Non-Python Design to fix:\n{dirty_arch}"
-        messages = [
-            LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=user_prompt)
-        ]
-        response = await self.llm.generate(messages, temperature=0.1)
-        return response.content
+        """Kept for backward compatibility — no longer used in design_architecture."""
+        return False
 
     def _sanitize_architecture_for_engineer(self, arch_str: str) -> str:
-        """
-        Translates JS terms and FORCE-RENAMES extensions inside the arch JSON.
-        """
-        # 1. Term replacements
+        """Translates JS terms for Python-only projects."""
         replacements = {
             "React": "Python/Jinja2", "Next.js": "FastAPI", "node.js": "Python",
             "TypeScript": "Python", "JavaScript": "Python", "npm install": "pip install",
@@ -144,36 +153,25 @@ class ArchitectAgent(Agent):
         }
         for js_term, py_term in replacements.items():
             arch_str = re.sub(re.escape(js_term), py_term, arch_str, flags=re.IGNORECASE)
-        
-        # 2. Path/Extension replacements: Force ".js" to ".py" inside the JSON
         arch_str = re.sub(r'\.(js|ts|jsx|tsx|css|html)\b', '.py', arch_str)
-        
         return arch_str
 
-    def _python_fallback_architecture(self, prd: str) -> str:
-        return f"""
-{{
-  "projectName": "Python Fallback Project",
-  "techStack": {{ "backend": "FastAPI", "database": "SQLite", "language": "Python 3.11" }},
-  "fileStructure": {{ "src": ["main.py", "models.py", "utils.py"], "root": ["requirements.txt", "README.md"] }}
-}}
-"""
+    def _language_fallback_architecture(self, prd: str, language: str = "python", lang_name: str = "Python", web_framework: str = "fastapi") -> str:
+        """Generate a language-aware fallback architecture when LLM output is unparseable."""
+        from foundry.utils.language_config import get_language_config
+        lang_config = get_language_config(language)
+        ext = lang_config["extension"]
+        pkg_mgr = lang_config["package_manager"]
+        return (
+            '{\n'
+            f'  "projectName": "{lang_name} Fallback Project",\n'
+            f'  "techStack": {{"backend": "{web_framework}", "language": "{lang_name}"}},\n'
+            f'  "fileStructure": {{"src": ["main{ext}", "models{ext}", "utils{ext}"], "root": ["{pkg_mgr}.json" if pkg_mgr == "npm" else "requirements.txt", "README.md"]}}\n'
+            '}'
+        )
 
-    def _is_non_python_stack(self, content: str) -> bool:
-        """Expanded case-insensitive forbidden list."""
-        forbidden = [
-            "node.js", "express.js", "react.js", "npm ", "yarn ", "mongodb", "next.js", 
-            "typescript", "vue.js", "angular", "webpack", "vite", ".jsx", ".tsx", 
-            "package.json", "node_modules", "javascript", "react-dom", "react-router",
-            "nodejs", "expressjs", "reactjs", "nextjs", "vuejs"
-        ]
-        lower_content = content.lower()
-        if any(f in lower_content for f in forbidden):
-            return True
-        # Final check for ".js" or ".ts" extensions in the text
-        if re.search(r'\.(js|ts|jsx|tsx)\b', lower_content):
-            return True
-        return False
+    def _python_fallback_architecture(self, prd: str) -> str:
+        return self._language_fallback_architecture(prd, "python", "Python", "fastapi")
 
     async def organize_file_structure(self, architecture: Dict[str, Any], tech_stack: Dict[str, str]) -> Dict[str, Any]:
         """
@@ -240,9 +238,24 @@ Technology Stack:
         response = await self.llm.generate(messages, temperature=0.5)
         
         try:
-            return json.loads(response.content)
+            result = json.loads(response.content)
+            # Ensure conventions is never empty — populate defaults if missing or empty
+            if not result.get("conventions"):
+                result["conventions"] = {
+                    "naming": "snake_case for files, PascalCase for classes",
+                    "structure_pattern": "Feature-based organization",
+                    "test_location": "Co-located with source files",
+                }
+            return result
         except json.JSONDecodeError:
-            return {"root_structure": {"directories": [], "files": []}, "conventions": {}}
+            return {
+                "root_structure": {"directories": [], "files": []},
+                "conventions": {
+                    "naming": "snake_case for files, PascalCase for classes",
+                    "structure_pattern": "Feature-based organization",
+                    "test_location": "Co-located with source files",
+                },
+            }
 
     async def document_architectural_decisions(
         self, 
