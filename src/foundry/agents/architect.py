@@ -1,5 +1,6 @@
 from typing import Dict, Any, Optional
 import json
+import re
 from datetime import datetime
 from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.factory import LLMProviderFactory
@@ -26,16 +27,19 @@ class ArchitectAgent(Agent):
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         if message.message_type == MessageType.TASK:
             prd = message.payload.get("prd", "")
+            requirements = message.payload.get("requirements", "") # Fix L
             if not prd:
                 return None
-            return await self.design_architecture(prd)
+            return await self.design_architecture(prd, requirements)
         return None
 
-    async def design_architecture(self, prd_content: str) -> AgentMessage:
+    async def design_architecture(self, prd_content: str, requirements: str = "") -> AgentMessage:
         """
         Design system architecture based on PRD.
         """
-        system_prompt = """You are an expert System Architect.
+        # Fix L: System-level Grounding
+        grounding_anchor = f"\nABSOLUTE DOMAIN: {requirements}\n" if requirements else ""
+        system_prompt = f"""You are an expert System Architect.{grounding_anchor}
         Your goal is to design a robust, scalable system architecture based on the provided Product Requirements Document (PRD).
 
         ABSOLUTE SYSTEM REQUIREMENT: You are a PYTHON-ONLY ARCHITECT. 
@@ -63,20 +67,37 @@ class ArchitectAgent(Agent):
         Return the result as a JSON object.
         """
 
-        user_prompt = f"Design the architecture for the following PRD:\n\n{prd_content}"
-
         messages = [
             LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=user_prompt)
+            LLMMessage(role="user", content=f"Design the architecture for the following PRD:\n\n{prd_content}")
         ]
 
-        response = await self.llm.generate(messages, temperature=0.7)
-        architecture_content = response.content
+        # MULTI-PASS VALIDATION: Ensure the architecture is strictly Pythonic
+        valid_architecture = False
+        attempts = 0
+        architecture_content = ""
+        
+        while not valid_architecture and attempts < 2:
+            attempts += 1
+            response = await self.llm.generate(messages, temperature=0.2)
+            architecture_content = response.content
+            
+            if not self._is_non_python_stack(architecture_content):
+                valid_architecture = True
+            else:
+                print(f"CRITICAL: Non-Python architecture detected (Attempt {attempts}). Triggering Self-Correction...")
+                # Update messages for correction pass
+                correction_prompt = f"CRITICAL ERROR: You suggested a non-Python tech stack. REWRITE this design to be 100% PYTHON (FastAPI/Flask/SQL). ABSOLUTELY NO Node, React, or JS.\n\nInvalid Design:\n{architecture_content}"
+                messages.append(LLMMessage(role="assistant", content=architecture_content))
+                messages.append(LLMMessage(role="user", content=correction_prompt))
 
-        # POST-PROCESSING: Self-Correction Loop for Python enforcement
-        if self._is_non_python_stack(architecture_content):
-            print("CRITICAL: Non-Python architecture detected. Triggering Architect Self-Correction...")
-            architecture_content = await self._self_correct_architecture(architecture_content, prd_content)
+        # Final Hard-Fail: If still JS after attempts, use fallback
+        if not valid_architecture:
+            print("Architect Self-Correction failed. Using Hardened Python Fallback Template.")
+            architecture_content = self._python_fallback_architecture(prd_content)
+
+        # Fix 1: Final sanitization pass to translate any remaining terms
+        architecture_content = self._sanitize_architecture_for_engineer(architecture_content)
 
         return AgentMessage(
             sender=self.agent_type,
@@ -106,8 +127,53 @@ class ArchitectAgent(Agent):
             LLMMessage(role="system", content=system_prompt),
             LLMMessage(role="user", content=user_prompt)
         ]
-        response = await self.llm.generate(messages, temperature=0.2)
+        response = await self.llm.generate(messages, temperature=0.1)
         return response.content
+
+    def _sanitize_architecture_for_engineer(self, arch_str: str) -> str:
+        """
+        Translates JS terms and FORCE-RENAMES extensions inside the arch JSON.
+        """
+        # 1. Term replacements
+        replacements = {
+            "React": "Python/Jinja2", "Next.js": "FastAPI", "node.js": "Python",
+            "TypeScript": "Python", "JavaScript": "Python", "npm install": "pip install",
+            "package.json": "requirements.txt", "webpack": "Python build", "vite": "uvicorn",
+            "express": "FastAPI", "Express": "FastAPI", "Vue": "Python/HTMX",
+            "Mongoose": "SQLAlchemy", "MongoDB": "PostgreSQL"
+        }
+        for js_term, py_term in replacements.items():
+            arch_str = re.sub(re.escape(js_term), py_term, arch_str, flags=re.IGNORECASE)
+        
+        # 2. Path/Extension replacements: Force ".js" to ".py" inside the JSON
+        arch_str = re.sub(r'\.(js|ts|jsx|tsx|css|html)\b', '.py', arch_str)
+        
+        return arch_str
+
+    def _python_fallback_architecture(self, prd: str) -> str:
+        return f"""
+{{
+  "projectName": "Python Fallback Project",
+  "techStack": {{ "backend": "FastAPI", "database": "SQLite", "language": "Python 3.11" }},
+  "fileStructure": {{ "src": ["main.py", "models.py", "utils.py"], "root": ["requirements.txt", "README.md"] }}
+}}
+"""
+
+    def _is_non_python_stack(self, content: str) -> bool:
+        """Expanded case-insensitive forbidden list."""
+        forbidden = [
+            "node.js", "express.js", "react.js", "npm ", "yarn ", "mongodb", "next.js", 
+            "typescript", "vue.js", "angular", "webpack", "vite", ".jsx", ".tsx", 
+            "package.json", "node_modules", "javascript", "react-dom", "react-router",
+            "nodejs", "expressjs", "reactjs", "nextjs", "vuejs"
+        ]
+        lower_content = content.lower()
+        if any(f in lower_content for f in forbidden):
+            return True
+        # Final check for ".js" or ".ts" extensions in the text
+        if re.search(r'\.(js|ts|jsx|tsx)\b', lower_content):
+            return True
+        return False
 
     async def organize_file_structure(self, architecture: Dict[str, Any], tech_stack: Dict[str, str]) -> Dict[str, Any]:
         """

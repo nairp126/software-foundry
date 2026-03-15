@@ -21,6 +21,7 @@ class Neo4jClient:
         self._uri = settings.neo4j_uri
         self._user = settings.neo4j_user
         self._password = settings.neo4j_password
+        self.logger = logger
 
     async def connect(self) -> None:
         """Establish connection to Neo4j database."""

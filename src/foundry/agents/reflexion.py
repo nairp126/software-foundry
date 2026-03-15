@@ -247,7 +247,9 @@ class ReflexionEngine(Agent):
         """Generate fixes using LLM."""
         system_prompt = """You are an expert code debugger and fixer.
         
-        Your task is to analyze the error and generate a corrected version of the code.
+        ABSOLUTE REQUIREMENT: You MUST fix the code using ONLY Python 3.11+.
+        PROHIBITED: Do NOT suggest Node.js, React, npm, or JavaScript solutions. 
+        If you detect non-Python logic, rewrite it to Python (FastAPI/Flask).
         
         Provide ONLY the corrected code without any explanations or markdown formatting.
         """
@@ -448,6 +450,10 @@ class ReflexionEngine(Agent):
             system_prompt = """You are an expert code debugger.
             Analyze the error and the project files. 
             Provide a fix plan to resolve the issue.
+            
+            ABSOLUTE REQUIREMENT: Use ONLY Python 3.11+.
+            PROHIBITED: No Node.js, React, or JavaScript.
+            
             Since you are in a self-healing loop, respond with the 'fix_plan' string only.
             """
             

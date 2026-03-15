@@ -36,6 +36,18 @@ class EngineerAgent(Agent):
         "bandit_compliance": True
     }
     
+    # Fix 2: Comprehensive JS Detection Regex
+    JS_PATTERNS = re.compile(
+        r'\b(const |let |var |require\(|import React|express\(\)|module\.exports|'
+        r'export default|npm install|\.then\(|\.catch\(|document\.|window\.|'
+        r'addEventListener|async function\s+\w+\s*\(|=>\s*\{|\.jsx?["\'])',
+        re.MULTILINE | re.IGNORECASE
+    )
+
+    def _has_js_leakage(self, code: str) -> bool:
+        """Returns True if the code contains JavaScript-specific syntax."""
+        return bool(self.JS_PATTERNS.search(code))
+
     def __init__(self, model_name: Optional[str] = None):
         super().__init__(AgentType.ENGINEER, model_name)
         self.llm = LLMProviderFactory.create_provider(model_name=self.model_name)
@@ -53,15 +65,25 @@ class EngineerAgent(Agent):
         if message.message_type == MessageType.TASK:
             architecture = message.payload.get("architecture", "")
             prd = message.payload.get("prd", "")
+            requirements = message.payload.get("requirements", "") # Fix L
             fix_instructions = message.payload.get("fix_instructions", "")
             existing_code = message.payload.get("existing_code", {})
             
             if not architecture:
                 return None
-            return await self.generate_code(architecture, prd, fix_instructions, existing_code, message.payload.get("project_id", "current"))
+            return await self.generate_code(architecture, prd, requirements, fix_instructions, existing_code, message.payload.get("project_id", "current"))
         return None
 
-    async def generate_code(self, architecture_content: str, prd_content: str = "", fix_instructions: str = "", existing_code: Dict[str, str] = None, project_id: str = "current") -> AgentMessage:
+    async def _request_code_generation(self, filename: str, architecture: str, language: str, coding_standard: str, prd: str = "", requirements: str = "", context: str = "", fix_instructions: str = "", existing_version: str = None) -> str:
+        """
+        Internal method for code generation prompting.
+        """
+        # Fix L: Domain Grounding
+        grounding_anchor = f"\nABSOLUTE DOMAIN: {requirements}\n" if requirements else ""
+        system_prompt = f"""You are an expert Software Engineer.{grounding_anchor}
+        Your goal is to write high-quality, professional-grade code for the file: {filename}
+        """
+    async def generate_code(self, architecture_content: str, prd_content: str = "", requirements: str = "", fix_instructions: str = "", existing_code: Dict[str, str] = None, project_id: str = "current") -> AgentMessage:
         """
         Generate code based on architecture with quality and security measures.
         """
@@ -71,10 +93,8 @@ class EngineerAgent(Agent):
         # Step 2: Detect language from architecture (Hardened to Python)
         language = "python" # Force Python as per system constraints
         
-        # Step 3: Generate code for each file (Simplified MVP: limit to 3 key files to save time/tokens)
-        generated_files = {}
-        
         # Step 3: Generate code for each file sequentially for stability
+        generated_files = {}
         files_to_generate = self._parse_file_list(file_structure)
         files_to_generate = files_to_generate[:3]  # Keep MVP limit
         
@@ -87,37 +107,49 @@ class EngineerAgent(Agent):
                 language, 
                 generated_files, 
                 prd_content, 
+                requirements, # Fix L
                 fix_instructions,
                 existing_code.get(filename) if existing_code else None,
                 project_id
             )
             
-            # FAIL-SAFE: Check for JS leakage in what should be Python
-            patterns = ["const ", "require(", "import React", "express()", "module.exports", "export default", "npm install"]
-            has_js = any(p in code for p in patterns)
-            
-            if filename.endswith(".py") and has_js:
-                print(f"CRITICAL: JS leakage detected in {filename}. Retrying with Python force...")
-                code = await self._recover_with_python_force(filename, code, architecture_content)
+            # Fix 3: 3-Attempt Recovery Loop
+            for attempt in range(3):
+                if filename.endswith(".py") and self._has_js_leakage(code):
+                    print(f"CRITICAL: JS leakage detected in {filename} (Attempt {attempt+1}). Retrying with Python force...")
+                    code = await self._recover_with_python_force(filename, code, architecture_content)
+                else:
+                    break
+            else:
+                # All 3 attempts failed — generate a minimal stub instead of persisting JS
+                print(f"FATAL: All recovery attempts failed for {filename}. Generating Auto-stub.")
+                code = f'# Auto-stub: generation failed for {filename} due to persistent JS leakage.\nraise NotImplementedError("{filename} requires manual implementation")\n'
             
             generated_files[filename] = code
         
-        # Step 4: Generate unit tests for generated code
-        test_files = await self.generate_tests(generated_files, language)
+        # Final "Last-Mile" Sanity Check: Force extensions on all keys
+        final_repo = {}
+        for filename, content in generated_files.items():
+            f_clean = filename.strip()
+            # If it's a code file with a non-python extension, RENAME IT
+            if any(f_clean.lower().endswith(ext) for ext in ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs']):
+                new_name = os.path.splitext(f_clean)[0] + ".py"
+                final_repo[new_name] = content
+            else:
+                final_repo[f_clean] = content
         
-        # Step 5: Run quality gates
-        quality_result = await self.run_quality_gates(generated_files, language, "/tmp/project")
-        
-        # Validate component integration
-        integration_report = self._validate_component_integration(generated_files)
+        # Sync tests and quality gates to use the cleaned repo
+        test_files = await self.generate_tests(final_repo, language)
+        quality_result = await self.run_quality_gates(final_repo, language, "/tmp/project")
+        integration_report = self._validate_component_integration(final_repo)
             
         return AgentMessage(
             sender=self.agent_type,
             recipient=AgentType.CODE_REVIEW,
             message_type=MessageType.TASK,
             payload={
-                "code_repo": generated_files,
-                "code": generated_files,  # Backward compatibility
+                "code_repo": final_repo,
+                "code": final_repo,  # Backward compatibility
                 "tests": test_files,
                 "file_structure": file_structure,
                 "integration_report": integration_report,
@@ -127,15 +159,16 @@ class EngineerAgent(Agent):
         )
     
     async def _plan_file_structure(self, architecture: str, prd: str = "") -> str:
-        system_prompt = """You are an expert Software Engineer.
-        Plan the file structure for the project based on the provided architecture and product requirements.
+        system_prompt = f"""You are a Python Expert.
+        Plan the file structure for a project based on the following architecture.
         
-        ABSOLUTE REQUIREMENT: Use ONLY Python language. You are a Python specialist. 
-        PROHIBITED: Do NOT suggest Node.js, React, JavaScript, TypeScript, or any non-Python tech.
+        ABSOLUTE REQUIREMENT: You MUST use ONLY .py extensions for code files.
+        PROHIBITED: No .js, .ts, .jsx, .html, .css, .java, .go, .rs.
+        If the architecture suggests a 'Frontend' with 'React', use 'FastAPI' with 'Jinja2' patterns.
         
-        Ensure all code files have .py extensions.
-        Return ONLY a JSON list of file paths (e.g., ["src/main.py", "requirements.txt"]).
+        Return ONLY a JSON list of absolute file paths (e.g. ["src/main.py", "src/utils.py", "requirements.txt"]).
         """
+        
         user_prompt = f"Architecture:\n{architecture}"
         if prd:
             user_prompt += f"\n\nProduct Requirements (PRD):\n{prd}"
@@ -143,27 +176,72 @@ class EngineerAgent(Agent):
             LLMMessage(role="system", content=system_prompt),
             LLMMessage(role="user", content=user_prompt)
         ]
-        response = await self.llm.generate(messages, temperature=0.5)
+        response = await self.llm.generate(messages, temperature=0.1)
         return response.content
 
     def _parse_file_list(self, response_content: str) -> List[str]:
+        """
+        Parses the Architect's file structure output into a flat list of paths.
+        Enforces .py extensions recursively.
+        """
         try:
-            # simple cleanup and parse
+            # Cleanup and parse
             content = response_content.strip()
             if content.startswith("```json"):
                 content = content.replace("```json", "").replace("```", "")
-            files = json.loads(content)
-            # FORCE PYTHON EXTENSIONS: Replace .js, .ts, etc. with .py
+            
+            # Use JSON loads to handle the possibly nested structure
+            raw_structure = json.loads(content)
+            
+            # RECURSIVE FLATTENING: Ensure we catch nested files like src/components/App.js
+            flat_paths = self._flatten_file_structure(raw_structure)
+            
+            # FORCE PYTHON EXTENSIONS: Multi-pass hardening
             clean_files = []
-            for f in files:
-                if f.endswith(('.js', '.ts', '.java', '.go', '.rs')):
-                    clean_files.append(os.path.splitext(f)[0] + ".py")
+            for f in flat_paths:
+                f_stripped = f.strip()
+                # Check for common JS/TS/Other extensions (case-insensitive)
+                if any(f_stripped.lower().endswith(ext) for ext in ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs']):
+                    # Replace with .py
+                    base = os.path.splitext(f_stripped)[0]
+                    clean_files.append(base + ".py")
                 else:
-                    clean_files.append(f)
+                    clean_files.append(f_stripped)
+            
             return clean_files
-        except Exception:
+        except Exception as e:
+            print(f"Error parsing file list: {e}. Falling back to default.")
             # Fallback - ensure .py extensions
             return ["main.py", "requirements.txt", "README.md"]
+
+    def _flatten_file_structure(self, structure: Any, current_path: str = "") -> List[str]:
+        """
+        Recursively flattens nested dictionaries/lists into project paths.
+        """
+        paths = []
+        if isinstance(structure, dict):
+            for key, value in structure.items():
+                # Join key to path
+                new_path = os.path.join(current_path, key) if current_path else key
+                if isinstance(value, (dict, list)):
+                    # Recurse if value is a sub-structure
+                    paths.extend(self._flatten_file_structure(value, new_path))
+                else:
+                    # If value is a leaf (filename or string mapping), use the key as the path
+                    # Some architectures use {"main.js": "Main entry point"}, we want "main.js"
+                    # Others use {"src": {"main.js": "..."}}, we want "src/main.js"
+                    paths.append(new_path)
+        elif isinstance(structure, list):
+            for item in structure:
+                if isinstance(item, (dict, list)):
+                    paths.extend(self._flatten_file_structure(item, current_path))
+                else:
+                    paths.append(os.path.join(current_path, item) if current_path else item)
+        elif isinstance(structure, str):
+            paths.append(os.path.join(current_path, structure) if current_path else structure)
+        
+        # Deduplicate and normalize
+        return list(set(p.replace("\\", "/") for p in paths if p))
 
     def _detect_language(self, architecture_content: str) -> str:
         """
@@ -178,6 +256,7 @@ class EngineerAgent(Agent):
         language: str, 
         previously_generated: Dict[str, str] = None, 
         prd: str = "", 
+        requirements: str = "", # Fix L
         fix_instructions: str = "",
         existing_version: str = None,
         project_id: str = "current"
@@ -235,55 +314,19 @@ class EngineerAgent(Agent):
                         truncated_code = f"... [TRUNCATED] ...\n{prev_code[-2000:]}"
                     context_str += f"\n--- {prev_file} ---\n```python\n{truncated_code}\n```\n"
 
-        system_prompt = f"""You are an expert Software Engineer.
-        Generate the content for: {filename}
-        Based on the architecture and PRD provided.{context_str}{kg_context}
-        """
+        code = await self._request_code_generation(
+            filename, 
+            architecture, 
+            language, 
+            coding_standard, 
+            prd, 
+            requirements, # Fix L
+            context_str, 
+            fix_instructions, 
+            existing_version
+        )
         
-        if existing_version and fix_instructions:
-            system_prompt += f"""
-            
-            SURGICAL REPAIR MODE:
-            You are fixing an existing file. Do NOT rewrite it entirely if not necessary.
-            Focus on resolving the issues described in the FIX INSTRUCTIONS while maintaining 
-            the existing structure and logic where correct.
-            
-            EXISTING CODE BASELINE:
-            ```
-            {existing_version}
-            ```
-            
-            FIX INSTRUCTIONS:
-            {fix_instructions}
-            """
-        elif fix_instructions:
-            system_prompt += f"\n\nCRITICAL FIX INSTRUCTIONS (Addressing previous review feedback):\n{fix_instructions}\n"
-        
-        system_prompt += f"""
-        
-        ARCHITECTURE:
-        {architecture}
-        
-        PRD:
-        {prd}
-        
-        ABSOLUTE PYTHON REQUIREMENT:
-        1. You MUST generate ONLY Python code. 
-        2. Prohibited: No JavaScript, No Node.js, No React. Even if the architecture suggests them, OVERRIDE it with Python equivalents (FastAPI/Flask).
-        3. Follow {coding_standard}.
-        4. Include error handling and input validation.
-        5. No hardcoded secrets. Use env vars.
-        6. Add type hints and docstrings.
-        
-        Return ONLY the code content. No markdown blocks.
-        """
-        user_prompt = f"File: {filename}\nLanguage: {language}"
-        messages = [
-            LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=user_prompt)
-        ]
-        response = await self.llm.generate(messages, temperature=0.2)
-        return self._clean_code(response.content)
+        return code
     
     def _clean_code(self, content: str) -> str:
         """
@@ -428,11 +471,13 @@ class EngineerAgent(Agent):
         
         improvements_needed = "\n".join([f"- {issue_descriptions.get(issue, issue)}" for issue in issues])
         
-        system_prompt = f"""You are a code quality expert.
-        Improve the following code by addressing these issues:
-        {improvements_needed}
+        system_prompt = """You are a Python Quality Expert. 
+        Improve the provided code based on the instructions.
         
-        Return ONLY the improved code without explanations.
+        ABSOLUTE REQUIREMENT: You MUST implement improvements using ONLY Python 3.11+.
+        PROHIBITED: Do NOT use any JavaScript, Node, or web-framework syntax.
+        
+        Return ONLY the updated code without any explanations.
         """
         
         user_prompt = f"File: {filename}\nLanguage: {language}\n\nCode:\n{code}"
@@ -584,6 +629,7 @@ class EngineerAgent(Agent):
                 print(f"Failed to generate tests for {filename}: {e}")
         
         return test_files
+
 
     async def run_quality_gates(
         self, code_files: Dict[str, str], language: str, project_path: str

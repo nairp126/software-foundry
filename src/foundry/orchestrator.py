@@ -3,6 +3,8 @@ import json
 import os
 import uuid
 import logging
+import asyncio
+import re
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
@@ -43,8 +45,15 @@ class GraphState(TypedDict):
 
 class AgentOrchestrator:
     """Manages the autonomous software development lifecycle using LangGraph."""
+    # Fix 5: Master JS Detection Regex (Final Write-Time Gate)
+    JS_PATTERNS = re.compile(
+        r'\b(const |let |var |require\(|import React|express\(\)|module\.exports|'
+        r'export default|npm install|\.then\(|\.catch\(|document\.|window\.|'
+        r'addEventListener|async function\s+\w+\s*\(|=>\s*\{|\.jsx?["\'])',
+        re.MULTILINE | re.IGNORECASE
+    )
 
-    def __init__(self):
+    def __init__(self, model_name: Optional[str] = None):
         self.pm_agent = ProductManagerAgent()
         self.architect_agent = ArchitectAgent()
         self.engineer_agent = EngineerAgent()
@@ -97,12 +106,16 @@ class AgentOrchestrator:
         
         # Get the latest message from the history if any
         user_prompt = state["messages"][-1].content if state["messages"] else ""
+        logger.info(f"PM Node processing requirements: {user_prompt[:50]}...")
         
         message = AgentMessage(
             sender=AgentType.PRODUCT_MANAGER,
             recipient=AgentType.PRODUCT_MANAGER,
             message_type=MessageType.TASK,
-            payload={"prompt": user_prompt}
+            payload={
+                "prompt": user_prompt,
+                "requirements": user_prompt # Fix L: Direct Anchor
+            }
         )
         
         response = await self.pm_agent.process_message(message)
@@ -119,7 +132,10 @@ class AgentOrchestrator:
             
         return {
             "messages": [AIMessage(content=f"PRD generated:\n{prd}")],
-            "project_context": {"prd": prd}
+            "project_context": {
+                "prd": prd,
+                "requirements": state.get("requirements", "") # Persist for next nodes
+            }
         }
 
     async def _architect_node(self, state: GraphState) -> Dict[str, Any]:
@@ -127,11 +143,15 @@ class AgentOrchestrator:
         await self._update_project_status(state["project_id"], ProjectStatus.running_architect)
         
         prd = state["project_context"].get("prd", "")
+        requirements = state.get("requirements", "") # Fix L
         message = AgentMessage(
             sender=AgentType.PRODUCT_MANAGER,
             recipient=AgentType.ARCHITECT,
             message_type=MessageType.TASK,
-            payload={"prd": prd}
+            payload={
+                "prd": prd,
+                "requirements": requirements
+            }
         )
         
         response = await self.architect_agent.process_message(message)
@@ -148,7 +168,11 @@ class AgentOrchestrator:
             
         return {
             "messages": [AIMessage(content=f"Architecture designed:\n{architecture}")],
-            "project_context": {"architecture": architecture, "prd": prd}
+            "project_context": {
+                "architecture": architecture, 
+                "prd": prd,
+                "requirements": state.get("requirements", "") # Persist for next nodes
+            }
         }
 
     async def _engineer_node(self, state: GraphState) -> Dict[str, Any]:
@@ -165,6 +189,7 @@ class AgentOrchestrator:
         payload = {
             "architecture": architecture,
             "prd": prd,
+            "requirements": state.get("requirements", ""), # Fix L
             "fix_instructions": reflexion_feedback,
             "existing_code": existing_code,
             "project_id": state["project_id"],
@@ -365,7 +390,26 @@ class AgentOrchestrator:
         # CLEANING: Strip markdown backticks for code files
         if artifact_type == ArtifactType.code:
             content = content.replace("```python", "").replace("```javascript", "").replace("```js", "").replace("```", "").strip()
+            
+            # Fix 5: Master Write-Time Gate
+            # 1. Block forbidden extensions entirely
+            forbidden_exts = ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs', '.php', '.html', '.css']
+            if any(name.lower().endswith(ext) for ext in forbidden_exts):
+                logger.critical(f"MASTER GATE BLOCKED forbidden extension: {name}. Substituting error stub.")
+                content = f"# BLOCKED: Forbidden file type {name} detected in Python project.\n"
+                # Optionally rename to .py to prevent sandbox breakage
+                if not name.endswith(".py"):
+                    name = os.path.splitext(name)[0] + ".py"
+            
+            # 2. Block JS content in Python files
+            if name.endswith(".py") and bool(self.JS_PATTERNS.search(content)):
+                logger.critical(f"FINAL GATE BLOCKED: JS leakage detected in {name}. Substituting error stub.")
+                content = f"# BLOCKED: JavaScript leakage detected during final save.\n# Manual implementation required.\n"
         
+        # Update path after possible name change
+        file_path = os.path.join(project_dir, name)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
             

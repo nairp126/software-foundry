@@ -63,8 +63,6 @@ from foundry.api.schemas import (
 #  Application
 # ------------------------------------------------------------------ #
 
-orchestrator: Optional[AgentOrchestrator] = None
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -79,8 +77,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         print(f"Warning: Failed to initialize Knowledge Graph: {e}")
         print("Application will continue without Knowledge Graph support")
     
-    global orchestrator
-    orchestrator = AgentOrchestrator()
     yield
     await knowledge_graph_service.disconnect()
     await redis_client.disconnect()
@@ -175,6 +171,8 @@ async def general_exception_handler(request: Request, exc: Exception):
 async def _run_project_background(project_id: str, requirements: str) -> None:
     """Background task that drives the orchestrator pipeline."""
     try:
+        # Fix K: Instantiate fresh orchestrator for every project to avoid memory contamination
+        orchestrator = AgentOrchestrator()
         await orchestrator.run(project_id=str(project_id), initial_prompt=requirements)
     except Exception as exc:
         print(f"[ERROR] Project {project_id} failed: {exc}")
@@ -207,8 +205,6 @@ async def create_project(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new project and start generation in the background."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
 
     project = Project(
         name=request.name,

@@ -110,13 +110,32 @@ class CodeReviewAgent(Agent):
         # Use Qwen to generate the review
         response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
         
-        # Ensure it's a dict
+        # Ensure it's a dict with ultra-robust cleaning
         review_data = response.content
         if isinstance(review_data, str):
             try:
-                review_data = json.loads(review_data)
-            except:
-                review_data = {"status": "REJECTED", "feedback": "Failed to parse review output", "issues": []}
+                # Use a more resilient approach: find the outermost { }
+                start = review_data.find('{')
+                end = review_data.rfind('}')
+                
+                if start != -1 and end != -1 and end > start:
+                    clean_json = review_data[start:end+1]
+                else:
+                    clean_json = review_data.strip()
+                
+                # Strip markdown logic as a secondary safety
+                if clean_json.startswith("```"):
+                    clean_json = re.sub(r'```[a-z]*\n|```', '', clean_json).strip()
+                
+                review_data = json.loads(clean_json)
+            except Exception as e:
+                print(f"CRITICAL: Failed to parse review output. Error: {e}. Raw content length: {len(review_data)}")
+                # Fallback: create a dummy rejection to force a cleaner retry
+                review_data = {
+                    "status": "REJECTED", 
+                    "feedback": f"AUTO-REJECT: JSON parsing failed. Please return valid JSON.", 
+                    "issues": ["JSON syntax error"]
+                }
 
         return AgentMessage(
             sender=self.agent_type,
