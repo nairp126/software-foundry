@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False)
     log_level: str = Field(default="INFO")
     generated_projects_path: str = Field(default="generated_projects")
+    host_generated_projects_path: Optional[str] = Field(default=None) # Path on the actual host (for Docker-in-Docker)
 
     # API
     api_host: str = Field(default="0.0.0.0")
@@ -70,6 +71,7 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = Field(default="change_this_secret_key_in_production")
+    foundry_api_key: Optional[str] = Field(default="foundry_master_key_2024") # Static master key
     jwt_algorithm: str = Field(default="HS256")
     jwt_expiration_minutes: int = Field(default=60)
 

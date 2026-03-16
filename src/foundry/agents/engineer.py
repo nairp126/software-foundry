@@ -3,11 +3,15 @@ import json
 import os
 import re
 import asyncio
+import logging
 from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.factory import LLMProviderFactory
 from foundry.llm.base import LLMMessage
 from foundry.testing.test_generator import TestGenerator, TestFramework
 from foundry.testing.quality_gates import QualityGates
+
+
+logger = logging.getLogger(__name__)
 
 class EngineerAgent(Agent):
     """
@@ -26,6 +30,8 @@ class EngineerAgent(Agent):
         "javascript": "ESLint Standard",
         "typescript": "ESLint + TypeScript Strict",
         "java": "Google Java Style",
+        "go": "Effective Go",
+        "rust": "Rust Style Guide",
     }
     
     # Security patterns to enforce
@@ -100,8 +106,13 @@ class EngineerAgent(Agent):
         - Add comprehensive error handling with try/except blocks
         - Use environment variables for secrets, never hardcode credentials
         - Write clean, readable, well-documented code
+        - MANDATORY: Include comprehensive unit tests for all logic. Place tests in a 'tests/' directory.
 
         {context}
+        
+        CRITICAL: Return ONLY the raw code for {filename}. 
+        Do NOT include any introduction, explanations, or conclusions after the code.
+        Do NOT include markdown fences in your internal logic, although your outer response should be a single clean code block.
         """
 
         if fix_instructions:
@@ -125,7 +136,7 @@ class EngineerAgent(Agent):
         from foundry.utils.language_config import get_language_config
 
         # Step 1: Plan file structure
-        file_structure = await self._plan_file_structure(architecture_content, prd_content)
+        file_structure = await self._plan_file_structure(architecture_content, prd_content, language=graph_state_language or "python")
 
         # Step 2: Detect language from GraphState
         language = self._detect_language(architecture_content, graph_state_language)
@@ -134,18 +145,18 @@ class EngineerAgent(Agent):
         # Step 3: Generate code for each file sequentially for stability
         generated_files = {}
         files_to_generate = self._parse_file_list(file_structure)
-        files_to_generate = files_to_generate[:3]  # Keep MVP limit
+        files_to_generate = files_to_generate[:5]  # Support slightly larger MVPs
 
         for i, filename in enumerate(files_to_generate):
-            print(f"DEBUG: Generating content for {filename}...")
+            logger.info(f"Generating content for {filename} ({i+1}/{len(files_to_generate)})...")
 
-            # KG: inject project summary into the first file's prompt (Req 16.1 / 19.3)
+            # KG: inject project summary into EVERY file's prompt (Req 16.1 / 19.3)
             kg_project_summary = ""
-            if i == 0 and self.kg_tools:
+            if self.kg_tools:
                 try:
                     kg_project_summary = await self.kg_tools.get_project_summary_for_generation(project_id)
                 except Exception as e:
-                    print(f"KG project summary retrieval failed: {e}")
+                    logger.warning(f"KG project summary retrieval failed: {e}")
 
             code = await self._generate_file_content(
                 filename,
@@ -163,13 +174,13 @@ class EngineerAgent(Agent):
             # 3-Attempt Language-Aware Recovery Loop
             for attempt in range(3):
                 if detect_language_mismatch(code, language):
-                    print(f"Language mismatch in {filename} (attempt {attempt + 1}). Recovering...")
+                    logger.warning(f"Language mismatch in {filename} (attempt {attempt + 1}). Recovering...")
                     code = await self._recover_with_correct_language(filename, code, architecture_content, language)
                 else:
                     break
             else:
                 # All 3 attempts failed — generate a minimal stub
-                print(f"FATAL: All recovery attempts failed for {filename}. Generating stub.")
+                logger.critical(f"All recovery attempts failed for {filename}. Generating stub.")
                 code = (
                     f"# Auto-stub: generation failed for {filename}.\n"
                     f"raise NotImplementedError('{filename} requires manual implementation')\n"
@@ -177,19 +188,18 @@ class EngineerAgent(Agent):
 
             generated_files[filename] = code
 
-        # For non-Python projects, do NOT rename extensions
+        # Standardize extensions and cleanup
         final_repo = {}
         for filename, content in generated_files.items():
             f_clean = filename.strip()
-            if language == "python":
-                # Python-only: rename forbidden extensions to .py
-                if any(f_clean.lower().endswith(ext) for ext in ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs']):
-                    new_name = os.path.splitext(f_clean)[0] + ".py"
-                    final_repo[new_name] = content
-                else:
-                    final_repo[f_clean] = content
-            else:
-                final_repo[f_clean] = content
+            # ONLY rename if the language is python AND we have a mismatch
+            if language == "python" and not f_clean.endswith(".py") and "." in f_clean:
+                # Basic safety: if it's clearly a code file but not .py, rename it
+                name_part, ext_part = os.path.splitext(f_clean)
+                if ext_part.lower() in ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs']:
+                    f_clean = name_part + ".py"
+            
+            final_repo[f_clean] = content
 
         test_files = await self.generate_tests(final_repo, language)
         quality_result = await self.run_quality_gates(final_repo, language, "/tmp/project")
@@ -213,8 +223,8 @@ class EngineerAgent(Agent):
     async def _plan_file_structure(self, architecture: str, prd: str = "", language: str = "python") -> str:
         from foundry.utils.language_config import get_language_config
         lang_config = get_language_config(language)
-        ext = lang_config["extension"]
-        lang_name = lang_config["name"].title()
+        ext = lang_config.extensions[0]
+        lang_name = lang_config.name.title()
 
         system_prompt = (
             f"You are an expert {lang_name} Engineer.\n"
@@ -251,9 +261,21 @@ class EngineerAgent(Agent):
             # RECURSIVE FLATTENING: Ensure we catch nested files like src/components/App.js
             flat_paths = self._flatten_file_structure(raw_structure)
             
-            return [f.strip() for f in flat_paths if f.strip()]
+            # Filter out directories: entries that don't have an extension or match common dir names
+            filtered_paths = []
+            for p in flat_paths:
+                clean_p = p.strip()
+                if not clean_p: continue
+                # Skip if it ends with / or matches common dirs or has no dot
+                if clean_p.endswith("/") or clean_p in ["src", "lib", "tests", "docs", "bin"]:
+                    continue
+                if "." not in os.path.basename(clean_p) and clean_p != "Dockerfile":
+                    continue
+                filtered_paths.append(clean_p)
+                
+            return filtered_paths
         except Exception as e:
-            print(f"Error parsing file list: {e}. Falling back to default.")
+            logger.error(f"Error parsing file list: {e}. Falling back to default.")
             return ["main.py", "requirements.txt", "README.md"]
 
     def _flatten_file_structure(self, structure: Any, current_path: str = "") -> List[str]:
@@ -289,6 +311,12 @@ class EngineerAgent(Agent):
         """Detect language from GraphState first, then fall back to architecture content."""
         if graph_state_language and graph_state_language.strip():
             return graph_state_language.lower().strip()
+        
+        # Fallback: simple inspection of architecture string
+        if "java" in architecture_content.lower(): return "java"
+        if "javascript" in architecture_content.lower() or "node.js" in architecture_content.lower(): return "javascript"
+        if "typescript" in architecture_content.lower(): return "typescript"
+        
         return "python"
 
     async def _generate_file_content(
@@ -323,7 +351,7 @@ class EngineerAgent(Agent):
                 )
                 kg_context = f"\n\nKNOWLEDGE GRAPH CONTEXT (Dependency & Impact Analysis):\n{self.kg_tools.format_for_llm(context_data)}\n"
             except Exception as e:
-                print(f"KG Context retrieval failed: {e}")
+                logger.warning(f"KG Context retrieval failed: {e}")
 
         context_str = ""
         if previously_generated:
@@ -341,7 +369,7 @@ class EngineerAgent(Agent):
                         dependency_names=dep_names
                     )
                 except Exception as e:
-                    print(f"GraphRAG retrieval failed, falling back to truncation: {e}")
+                    logger.warning(f"GraphRAG retrieval failed, falling back to truncation: {e}")
 
             if kg_surgical_context:
                 # GraphRAG path: Use precise, structured context from the KG
@@ -374,18 +402,30 @@ class EngineerAgent(Agent):
     def _clean_code(self, content: str) -> str:
         """
         Strips Markdown code blocks and other non-code text from LLM response.
+        Prioritizes content between backticks and strips common trailing chatter.
         """
         if not content:
             return ""
             
-        # Aggressive cleanup
-        clean_content = content
-        # Remove any leading/trailing markdown blocks with various line ending combinations
-        clean_content = re.sub(r'^\s*```[a-zA-Z]*\r?\n', '', clean_content, flags=re.MULTILINE)
-        clean_content = re.sub(r'\r?\n```\s*$', '', clean_content, flags=re.MULTILINE)
-        # Final safety strip of any remaining backticks
-        clean_content = clean_content.replace('```', '').strip()
+        # 1. Try to extract content between the first and last backticks
+        # Use greedy match for the outermost blocks
+        match = re.search(r'```(?:[a-zA-Z]*)\n?(.*?)\n?```', content, re.DOTALL)
+        if match:
+            clean_content = match.group(1).strip()
+        else:
+            # 2. Fallback: just strip any leading/trailing backticks and spaces
+            clean_content = content.replace('```', '').strip()
         
+        # 3. Aggressive chatter stripping for common LLM closing phrases
+        chatter_patterns = [
+            r'\n\nThis solution follows the specified architecture.*$',
+            r'\n\nI hope this helps.*$',
+            r'\n\nLet me know if you need anything else.*$',
+            r'\n\nRequirements met:.*$',
+        ]
+        for pattern in chatter_patterns:
+            clean_content = re.sub(pattern, '', clean_content, flags=re.DOTALL | re.IGNORECASE).strip()
+            
         return clean_content
 
     async def _recover_with_correct_language(self, filename: str, dirty_code: str, architecture: str, target_language: str = "python") -> str:
@@ -414,13 +454,8 @@ class EngineerAgent(Agent):
             if directory and not os.path.exists(directory):
                 os.makedirs(directory)
                 
-            # Clean up code blocks if present
-            clean_content = content
-            # Simple check for markdown blocks if LLM ignored instructions
-            if clean_content.strip().startswith("```"):
-                lines = clean_content.strip().split("\n")
-                if len(lines) >= 2:
-                    clean_content = "\n".join(lines[1:-1])
+            # Clean up code blocks using unified method
+            clean_content = self._clean_code(content)
 
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(clean_content)
@@ -570,7 +605,7 @@ class EngineerAgent(Agent):
                 imports.extend(matches)
         
         # JavaScript/TypeScript imports
-        elif filename.endswith(('.js', '.ts', '.jsx', '.tsx')):
+        elif any(filename.endswith(ext) for ext in ['.js', '.ts', '.jsx', '.tsx']):
             import_patterns = [
                 r'import\s+.*\s+from\s+["\']([^"\']+)["\']',
                 r'require\(["\']([^"\']+)["\']\)'
@@ -660,7 +695,7 @@ class EngineerAgent(Agent):
                 test_filename = self.test_generator.get_test_filename(filename, framework)
                 test_files[test_filename] = test_code
             except Exception as e:
-                print(f"Failed to generate tests for {filename}: {e}")
+                logger.warning(f"Failed to generate tests for {filename}: {e}")
         
         return test_files
 
@@ -693,7 +728,7 @@ class EngineerAgent(Agent):
                 "security_issues_count": len(result.security_issues),
             }
         except Exception as e:
-            print(f"Quality gates failed: {e}")
+            logger.error(f"Quality gates failed: {e}")
             return {
                 "passed": False,
                 "error": str(e),

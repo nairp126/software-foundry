@@ -3,17 +3,21 @@
 import asyncio
 import enum
 from typing import Optional, List, Any, AsyncIterator
+import logging
 import httpx
 from foundry.llm.base import BaseLLMProvider, LLMMessage, LLMResponse
 from foundry.config import settings
 
 
+
+logger = logging.getLogger(__name__)
+
+
 class OllamaProvider(BaseLLMProvider):
     """Ollama provider for local model inference."""
     
-    # Global semaphore to prevent resource contention on local Ollama
+    # Class-level semaphore to prevent VRAM exhaustion on local hardware (Req 8.4)
     _semaphore = asyncio.Semaphore(1)
-   
     def __init__(
         self,
         model_name: Optional[str] = None,
@@ -104,9 +108,9 @@ class OllamaProvider(BaseLLMProvider):
             print(f"Error: {e}")
             raise
 
-        async with self._semaphore:
-            print(f"DEBUG: LLM Request starting (Payload: {len(str(payload))} chars)")
-            try:
+        try:
+            async with self._semaphore:
+                logger.info(f"LLM Request starting (Model: {self.model_name}, Payload: {len(str(payload))} chars)")
                 response = await asyncio.wait_for(
                     self.client.post(
                         f"{self.base_url}/api/chat",
@@ -114,10 +118,10 @@ class OllamaProvider(BaseLLMProvider):
                     ),
                     timeout=120.0,
                 )
-            except asyncio.TimeoutError:
-                raise TimeoutError(
-                    f"Ollama request timed out after 120s for model {self.model_name}"
-                )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Ollama request timed out after 120s for model {self.model_name}"
+            )
         if response.status_code == 404:
              raise ConnectionError(f"Model '{self.model_name}' not found in Ollama. Please run 'ollama pull {self.model_name}'")
         response.raise_for_status()

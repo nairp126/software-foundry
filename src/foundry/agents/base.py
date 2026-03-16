@@ -14,6 +14,7 @@ class AgentType(str, Enum):
     DEVOPS = "devops"
     CODE_REVIEW = "code_review"
     REFLEXION = "reflexion"
+    ORCHESTRATOR = "orchestrator"
 
 class MessageType(str, Enum):
     TASK = "task"

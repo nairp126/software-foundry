@@ -1,10 +1,13 @@
 import json
 import os
 import re
+import logging
 from typing import Dict, Any, Optional
 from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.factory import LLMProviderFactory
 from foundry.llm.base import LLMMessage
+
+logger = logging.getLogger(__name__)
 
 class ProductManagerAgent(Agent):
     """
@@ -16,31 +19,46 @@ class ProductManagerAgent(Agent):
         self.llm = LLMProviderFactory.create_provider(model_name=self.model_name)
 
     def _extract_json(self, content: str) -> dict:
-        """Strip markdown fences, parse JSON, return {} on failure."""
+        """Strip markdown fences, parse JSON, handle multiple blocks, return {} on failure."""
         if not content:
             return {}
-        # Strip markdown fences (```json ... ``` or ``` ... ```)
-        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", content.strip(), flags=re.MULTILINE)
-        stripped = re.sub(r"\s*```$", "", stripped.strip(), flags=re.MULTILINE)
-        stripped = stripped.strip()
-        # Try to find outermost JSON object
-        start = stripped.find("{")
-        end = stripped.rfind("}")
+        
+        # Try to find outermost JSON object (Fix: handle nested braces correctly)
+        start = content.find("{")
+        end = content.rfind("}")
+        
         if start != -1 and end != -1 and end > start:
-            stripped = stripped[start : end + 1]
-        try:
-            result = json.loads(stripped)
-            return result if isinstance(result, dict) else {}
-        except Exception:
-            return {}
+            json_str = content[start : end + 1]
+            try:
+                data = json.loads(json_str)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                # If direct chunk fails, try more aggressive stripping
+                pass
+
+        # Fallback to regex-based extraction for multiple smaller objects if needed
+        # (Though usually for PRD we want the big one)
+        json_pattern = r'\{[\s\S]*\}' # Greedy match to find the largest possible block
+        match = re.search(json_pattern, content)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+                
+        return {}
 
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         if message.message_type == MessageType.TASK:
             content = message.payload.get("prompt") or message.payload.get("content", "")
-            return await self.analyze_requirements(content)
+            project_id = message.payload.get("project_id", "unknown")
+            return await self.analyze_requirements(content, project_id=project_id)
         return None
 
-    async def analyze_requirements(self, requirements: str) -> AgentMessage:
+    async def analyze_requirements(self, requirements: str, project_id: str = "unknown") -> AgentMessage:
         """
         Analyze natural language requirements and generate a PRD.
         """
@@ -49,30 +67,34 @@ class ProductManagerAgent(Agent):
 
         grounding_anchor = f"\nABSOLUTE DOMAIN: {requirements}\n"
 
-        clarifying_note = (
-            '\n        - "clarifying_questions": ["..."]  // include when prompt is ambiguous\n'
-            if short_prompt else ""
-        )
-
         system_prompt = f"""You are an expert Product Manager.{grounding_anchor}
         Analyze the user's requirements and produce a structured Product Requirements Document (PRD) as JSON.
 
-        REQUIRED JSON STRUCTURE:
+        REQUIRED JSON SCHEMA (STRICT):
         {{
-            "project_name": "...",
-            "high_level_description": "...",
-            "core_features": ["...", "..."],
-            "user_stories": ["...", "..."],
-            "non_functional_requirements": ["..."],
-            "acceptance_criteria": ["..."],
-            "technical_constraints": ["..."]{clarifying_note}
+            "project_name": "string",
+            "high_level_description": "string",
+            "core_features": ["list of strings"],
+            "functional_requirements": ["list of strings"],
+            "user_stories": ["list of strings"],
+            "non_functional_requirements": {{
+                "security": ["list of strings"],
+                "scalability": ["list of strings"],
+                "performance": ["list of strings"]
+            }},
+            "out_of_scope": ["list of strings"],
+            "data_model_overview": ["list of strings describing entities and relationships"],
+            "acceptance_criteria": ["list of strings"],
+            "technical_constraints": ["list of strings"],
+            "clarifying_questions": ["list of strings"]
         }}
 
-        CRITICAL:
+        CRITICAL CONSTRAINTS:
         1. YOU MUST STAY WITHIN THE USER'S DOMAIN.
         2. RETURN ONLY THE JSON OBJECT. NO MARKDOWN, NO EXPLANATIONS.
-        3. No polite fillers like "Sure, I'd be happy to help".
-        {"4. The prompt is very short — include a non-empty 'clarifying_questions' list asking about scope, target users, and constraints." if short_prompt else ""}
+        3. DO NOT use a list for 'non_functional_requirements'. It MUST be a dictionary with keys: 'security', 'scalability', 'performance'.
+        4. Include a detailed 'data_model_overview' of at least 3 entities.
+        {"5. Ambiguous prompt — 'clarifying_questions' MUST be non-empty." if short_prompt else ""}
         """
         
         messages = [
@@ -80,32 +102,63 @@ class ProductManagerAgent(Agent):
             LLMMessage(role="user", content=f"PROJECT: {requirements}\n\nTask: Generate PRD JSON.")
         ]
         
-        print(f"DEBUG: PM Agent Analyzing: '{requirements[:50]}...'")
+        logger.info(f"PM Agent Analyzing requirements (Length: {len(requirements)} chars)")
         response = await self.llm.generate(messages, temperature=0.1)
         raw_content = response.content.strip()
-        print(f"DEBUG: PM Agent Raw Response: '{raw_content[:100]}...'")
+        logger.debug(f"PM Agent Raw Response: '{raw_content[:200]}...'")
         
-        # Hard Trace for diagnostics
-        try:
-            debug_path = os.path.join(os.getcwd(), "pm_debug.json")
-            with open(debug_path, "w") as f:
-                json.dump({"requirements": requirements, "response": raw_content}, f)
-        except Exception:
-            pass
-
         # Use _extract_json instead of direct json.loads (Req 17.4)
         prd_dict = self._extract_json(raw_content)
-        content = raw_content  # keep raw for keyword gate below
+        
+        # SCHEMA VALIDATION & AUTO-FIX (BUG-PM-1 enhancement)
+        def validate_and_fix_schema(data: dict) -> dict:
+            defaults = {
+                "project_name": "Untitled Project",
+                "high_level_description": "No description provided.",
+                "core_features": [],
+                "functional_requirements": [],
+                "user_stories": [],
+                "non_functional_requirements": {"security": [], "scalability": [], "performance": []},
+                "out_of_scope": [],
+                "data_model_overview": [],
+                "acceptance_criteria": [],
+                "technical_constraints": [],
+                "clarifying_questions": []
+            }
+            if not isinstance(data, dict): return defaults
+            
+            # Ensure NFR is a dict
+            if not isinstance(data.get("non_functional_requirements"), dict):
+                old_nfr = data.get("non_functional_requirements", [])
+                if isinstance(old_nfr, list):
+                    data["non_functional_requirements"] = {
+                        "security": [s for s in old_nfr if "security" in s.lower() or "auth" in s.lower()],
+                        "scalability": [s for s in old_nfr if "scale" in s.lower() or "load" in s.lower()],
+                        "performance": [s for s in old_nfr if s not in data["non_functional_requirements"]["security"] and s not in data["non_functional_requirements"]["scalability"]]
+                    }
+                else:
+                    data["non_functional_requirements"] = defaults["non_functional_requirements"]
+            
+            for key, val in defaults.items():
+                if key not in data:
+                    data[key] = val
+            return data
 
-        # Fix H: Keyword Validation Gate
+        prd_dict = validate_and_fix_schema(prd_dict)
+        content = json.dumps(prd_dict, indent=2)
+
+        # Fix H: Keyword Validation Gate with Stopword filtering
         requirements_lower = requirements.lower()
         content_lower = raw_content.lower()
         
-        key_terms = [t for t in requirements_lower.split() if len(t) > 3]
+        # Simple stopword list
+        STOP_WORDS = {"a", "an", "the", "and", "or", "but", "is", "if", "then", "else", "with", "for", "in", "on", "at", "to", "from", "create", "make", "build", "generate"}
+        key_terms = [t for t in re.findall(r'\w+', requirements_lower) if len(t) > 2 and t not in STOP_WORDS]
+        
         match_count = sum(1 for term in key_terms if term in content_lower)
         
         if len(key_terms) > 0 and match_count == 0:
-            print(f"WARNING: Project Drift detected in PM Agent (Matches: {match_count}/{len(key_terms)}). Retrying with 'Direct Anchor Pass'.")
+            logger.warning(f"Project Drift detected in PM Agent (Matches: {match_count}/{len(key_terms)}). Retrying with 'Direct Anchor Pass'.")
             focus_messages = [
                 LLMMessage(role="system", content=f"STRICT REQUIREMENT: You are a Product Manager for a {requirements} project. You MUST generate a PRD ONLY for a {requirements}. DO NOT hallucinate e-commerce or marketing platforms."),
                 LLMMessage(role="user", content=f"Generate the PRD JSON for a {requirements}. Use ONLY this domain.")
@@ -113,20 +166,26 @@ class ProductManagerAgent(Agent):
             response = await self.llm.generate(focus_messages, temperature=0.0)
             raw_content = response.content.strip()
             content = raw_content
-            print(f"DEBUG: PM Agent Focus Pass Response: '{raw_content[:100]}...'")
+            logger.info("PM Agent Focus Pass completed.")
             
             content_lower_v2 = raw_content.lower()
             match_count_v2 = sum(1 for term in key_terms if term in content_lower_v2)
             if match_count_v2 == 0:
-                print(f"FATAL: PM Agent persistently drifting on '{requirements}'. Triggering Fix N (Hard Fallback Template).")
+                logger.critical(f"PM Agent persistently drifting on '{requirements[:50]}'. Triggering Fix N (Hard Fallback Template).")
                 fallback_prd: Dict[str, Any] = {
                     "project_name": f"{requirements.title()} App",
                     "high_level_description": f"A specialized application for handling {requirements} logic, designed for reliability and performance.",
                     "core_features": [f"Basic {requirements} functions", "Data persistence", "User interface for interaction"],
                     "user_stories": [f"As a user, I want to use the {requirements} features to achieve my goal."],
-                    "non_functional_requirements": ["Performance", "Reliability"],
+                    "non_functional_requirements": {
+                        "security": ["Standard authentication"],
+                        "scalability": ["Horizontal scaling support"],
+                        "performance": ["Low latency responses"]
+                    },
+                    "data_model_overview": [f"Core {requirements} entity"],
                     "acceptance_criteria": [f"The {requirements} feature works end-to-end."],
                     "technical_constraints": ["Scalable architecture"],
+                    "clarifying_questions": []
                 }
                 if short_prompt:
                     fallback_prd["clarifying_questions"] = [
@@ -155,7 +214,8 @@ class ProductManagerAgent(Agent):
             all_reqs = features + user_stories
             if all_reqs:
                 from foundry.services.knowledge_graph import knowledge_graph_service
-                project_id = prd_dict.get("project_name", "unknown")[:36]
+                # Fix MED-PM-2: Use real project_id instead of slicing project_name
+                await knowledge_graph_service.connect()
                 for req_text in all_reqs:
                     try:
                         await knowledge_graph_service.store_requirement(
@@ -163,8 +223,9 @@ class ProductManagerAgent(Agent):
                             text=str(req_text),
                             source_agent="ProductManagerAgent",
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"PM Agent KG store failed for requirement: {e}")
+                await knowledge_graph_service.disconnect()
         except Exception:
             pass  # Non-blocking — KG outage must never block the pipeline
 

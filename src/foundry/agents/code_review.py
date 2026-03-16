@@ -1,10 +1,13 @@
 import json
 import re
+import logging
 from typing import Dict, Any, List, Optional
 from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.base import LLMMessage
 from foundry.llm.factory import LLMProviderFactory
 from foundry.testing.quality_gates import QualityGates
+
+logger = logging.getLogger(__name__)
 
 class CodeReviewAgent(Agent):
     def __init__(self, model_name: Optional[str] = None):
@@ -56,7 +59,7 @@ class CodeReviewAgent(Agent):
                 project_path=project_id
             )
         except Exception as e:
-            print(f"Dynamic analysis failed: {e}")
+            logger.warning(f"Dynamic analysis failed: {e}")
 
         # Step 2: Collect sandbox execution errors from caller-provided results (Req 20.1)
         sandbox_issues: List[Dict[str, Any]] = []
@@ -98,7 +101,7 @@ class CodeReviewAgent(Agent):
 
         Analyze the code for:
         1. Correctness: Does it look like it works? Are there logic errors?
-        2. Security: Are there hardcoded secrets, injection vulnerabilities, or other risks?
+        2. Security: Are there hardcoded secrets, injection vulnerabilities, or other risks specific to {language}?
         3. Style: Is the code clean, readable, and follows {language} best practices?
 
         {dynamic_context}
@@ -111,7 +114,9 @@ class CodeReviewAgent(Agent):
                 {{
                     "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
                     "file": "filename",
-                    "description": "description of the issue"
+                    "line": 123,
+                    "description": "description of the issue",
+                    "suggestion": "optional fix suggestion"
                 }}
             ]
         }}
@@ -131,45 +136,93 @@ class CodeReviewAgent(Agent):
 
         # Parse review response
         review_data = response.content
+        logger.debug(f"Code Review Raw Response: {str(review_data)[:200]}...")
+        
         if isinstance(review_data, str):
             try:
+                # 1. First try: Greedy extract between first { and last }
                 start = review_data.find('{')
                 end = review_data.rfind('}')
                 if start != -1 and end != -1 and end > start:
                     clean_json = review_data[start:end+1]
                 else:
                     clean_json = review_data.strip()
-                if clean_json.startswith("```"):
+                
+                # 2. Strip any remaining markdown fences
+                if "```" in clean_json:
                     clean_json = re.sub(r'```[a-z]*\n|```', '', clean_json).strip()
+                
                 review_data = json.loads(clean_json)
             except Exception as e:
-                print(f"CRITICAL: Failed to parse review output. Error: {e}.")
-                review_data = {
-                    "status": "REJECTED",
-                    "feedback": "AUTO-REJECT: JSON parsing failed. Please return valid JSON.",
-                    "issues": [],
-                }
+                logger.error(f"CRITICAL: Failed to parse review output for project {project_id}. Error: {e}.")
+                # Last resort fallback if it's mostly JSON but maybe has a trailing comma or something
+                try:
+                    import ast
+                    review_data = ast.literal_eval(clean_json)
+                    if not isinstance(review_data, dict):
+                         raise ValueError("Not a dictionary")
+                except:
+                    review_data = {
+                        "status": "REJECTED",
+                        "feedback": f"AUTO-REJECT: JSON parsing failed. Error: {str(e)[:100]}",
+                        "issues": [],
+                    }
 
         # Ensure review_data is a dict
         if not isinstance(review_data, dict):
             review_data = {"status": "REJECTED", "feedback": str(review_data), "issues": []}
 
-        # Step 4: Merge sandbox issues into the structured issues list (Req 20.1)
+        # Step 4: Merge sandbox issues into the structured issues list (Req 20.1 / HIGH-REV-1)
         existing_issues = review_data.get("issues", [])
-        # Normalise any non-dict entries that may have come from the LLM
         normalised_issues: List[Dict[str, Any]] = []
+
+        # 4a. Add Gate Results (Bandit, Pylint, etc.) directly to structured issues
+        if gate_results:
+            for sec_issue in gate_results.security_issues:
+                normalised_issues.append({
+                    "severity": sec_issue.severity.value.upper(),
+                    "file": sec_issue.file,
+                    "line": sec_issue.line,
+                    "description": sec_issue.description,
+                    "suggestion": sec_issue.recommendation,
+                    "source": "security_gate"
+                })
+            for lint_issue in gate_results.lint_issues:
+                normalised_issues.append({
+                    "severity": lint_issue.severity.upper() if isinstance(lint_issue.severity, str) else "MEDIUM",
+                    "file": lint_issue.file,
+                    "line": lint_issue.line,
+                    "description": lint_issue.message,
+                    "suggestion": f"Fix {lint_issue.rule}",
+                    "source": "lint_gate"
+                })
+            for type_issue in gate_results.type_issues:
+                normalised_issues.append({
+                    "severity": "MEDIUM",
+                    "file": type_issue.file,
+                    "line": type_issue.line,
+                    "description": type_issue.message,
+                    "suggestion": f"Fix type error {type_issue.error_code or ''}",
+                    "source": "type_gate"
+                })
+
+        # 4b. Normalise LLM issues
         for item in existing_issues:
             if isinstance(item, dict):
                 normalised_issues.append({
-                    "severity": item.get("severity", "MEDIUM"),
+                    "severity": item.get("severity", "MEDIUM").upper(),
                     "file": item.get("file", "unknown"),
+                    "line": item.get("line"),
                     "description": item.get("description", str(item)),
+                    "suggestion": item.get("suggestion", ""),
+                    "source": "llm_reviewer"
                 })
             else:
                 normalised_issues.append({
                     "severity": "MEDIUM",
                     "file": "unknown",
                     "description": str(item),
+                    "source": "llm_reviewer"
                 })
 
         # Prepend sandbox issues so they are visible first
@@ -188,7 +241,7 @@ class CodeReviewAgent(Agent):
 
         return AgentMessage(
             sender=self.agent_type,
-            recipient=AgentType.DEVOPS,
+            recipient=AgentType.REFLEXION, # Corrected semantic routing (MED-REV-1)
             message_type=MessageType.TASK,
             payload=payload,
         )

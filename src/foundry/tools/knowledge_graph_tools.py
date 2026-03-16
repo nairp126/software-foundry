@@ -82,7 +82,7 @@ class KnowledgeGraphTools:
             List of caller information
         """
         query = """
-        MATCH (project:Project {project_id: $project_id})
+        MATCH (project:Project {id: $project_id})
         MATCH (project)-[:CONTAINS*]->(caller)
         MATCH (project)-[:CONTAINS*]->(callee:Function {name: $function_name})
         MATCH (caller)-[:CALLS]->(callee)
@@ -93,8 +93,7 @@ class KnowledgeGraphTools:
         
         results = await self.kg_service.client.execute_query(
             query,
-            project_id=project_id,
-            function_name=function_name
+            {"project_id": project_id, "function_name": function_name}
         )
         
         return [dict(record) for record in results]
@@ -161,7 +160,7 @@ class KnowledgeGraphTools:
             List of components in the file
         """
         query = """
-        MATCH (project:Project {project_id: $project_id})
+        MATCH (project:Project {id: $project_id})
         MATCH (project)-[:CONTAINS*]->(component)
         WHERE component.file_path = $file_path
         RETURN component.name as name,
@@ -174,8 +173,7 @@ class KnowledgeGraphTools:
         
         results = await self.kg_service.client.execute_query(
             query,
-            project_id=project_id,
-            file_path=file_path
+            {"project_id": project_id, "file_path": file_path}
         )
         
         return [dict(record) for record in results]
@@ -195,7 +193,7 @@ class KnowledgeGraphTools:
             List of high-complexity components
         """
         query = """
-        MATCH (project:Project {project_id: $project_id})
+        MATCH (project:Project {id: $project_id})
         MATCH (project)-[:CONTAINS*]->(component:Function)
         WHERE component.complexity >= $min_complexity
         RETURN component.name as name,
@@ -207,8 +205,7 @@ class KnowledgeGraphTools:
         
         results = await self.kg_service.client.execute_query(
             query,
-            project_id=project_id,
-            min_complexity=min_complexity
+            {"project_id": project_id, "min_complexity": min_complexity}
         )
         
         return [dict(record) for record in results]
@@ -237,7 +234,7 @@ class KnowledgeGraphTools:
             return ""
         
         query = """
-        MATCH (project:Project {project_id: $project_id})
+        MATCH (project:Project {id: $project_id})
         MATCH (project)-[:CONTAINS*]->(node)
         WHERE node.name IN $names AND node.content IS NOT NULL AND node.content <> ''
         RETURN node.name as name, 
@@ -249,8 +246,7 @@ class KnowledgeGraphTools:
         try:
             results = await self.kg_service.client.execute_query(
                 query,
-                project_id=project_id,
-                names=dependency_names
+                {"project_id": project_id, "names": dependency_names}
             )
             
             if not results:
@@ -289,7 +285,7 @@ class KnowledgeGraphTools:
     ) -> List[Dict[str, Any]]:
         """Get a lightweight map of all files and their exported symbols."""
         query = """
-        MATCH (project:Project {project_id: $project_id})
+        MATCH (project:Project {id: $project_id})
         MATCH (project)-[:CONTAINS*]->(m:Module)
         RETURN m.file_path as file_path, 
                m.exports as exports,
@@ -299,7 +295,7 @@ class KnowledgeGraphTools:
         try:
             results = await self.kg_service.client.execute_query(
                 query,
-                project_id=project_id
+                {"project_id": project_id}
             )
             return [dict(record) for record in results]
         except Exception:
@@ -369,7 +365,7 @@ class KnowledgeGraphTools:
         """Return all ArchitectureDecision nodes for a project. Never raises."""
         try:
             query = """
-            MATCH (a:ArchitectureDecision {project_id: $project_id})
+            MATCH (a:ArchitectureDecision {id: $project_id})
             RETURN a.id as id, a.title as title, a.decision as decision,
                    a.rationale as rationale, a.language as language,
                    a.framework as framework
@@ -392,7 +388,7 @@ class KnowledgeGraphTools:
         try:
             # Fetch ADRs
             adr_query = """
-            MATCH (a:ArchitectureDecision {project_id: $project_id})
+            MATCH (a:ArchitectureDecision {id: $project_id})
             RETURN a.title as title, a.decision as decision, a.rationale as rationale
             ORDER BY a.created_at ASC LIMIT 5
             """
@@ -400,7 +396,7 @@ class KnowledgeGraphTools:
 
             # Fetch patterns
             pattern_query = """
-            MATCH (pt:Pattern {project_id: $project_id})
+            MATCH (pt:Pattern {id: $project_id})
             RETURN pt.name as name, pt.description as description, pt.code_snippet as code_snippet
             ORDER BY pt.created_at DESC LIMIT 5
             """
@@ -408,7 +404,7 @@ class KnowledgeGraphTools:
 
             # Fetch requirements
             req_query = """
-            MATCH (r:Requirement {project_id: $project_id})
+            MATCH (r:Requirement {id: $project_id})
             RETURN r.text as text
             ORDER BY r.created_at ASC LIMIT 10
             """

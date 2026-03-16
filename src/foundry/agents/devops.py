@@ -1,4 +1,5 @@
 import json
+import re
 import logging
 from typing import Dict, Any, Optional
 from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
@@ -33,7 +34,7 @@ class DevOpsAgent(Agent):
         # Unknown language — fall back via Language_Config
         try:
             from foundry.utils.language_config import get_language_config
-            image = get_language_config(lang_key).get("base_image", "python:3.11-slim")
+            image = get_language_config(lang_key).base_image
             logger.warning("Unknown language %r — falling back to base image %r from Language_Config.", language, image)
             return image
         except Exception:
@@ -44,7 +45,8 @@ class DevOpsAgent(Agent):
             architecture = message.payload.get("architecture")
             code_repo = message.payload.get("code_repo")
             language = message.payload.get("language", "python")
-            return await self.prepare_deployment(architecture, code_repo, language)
+            project_id = message.payload.get("project_id")
+            return await self.prepare_deployment(architecture, code_repo, language, project_id)
         return None
 
     async def prepare_deployment(
@@ -52,60 +54,84 @@ class DevOpsAgent(Agent):
         architecture: Dict[str, Any],
         code_repo: Optional[Dict[str, str]] = None,
         language: str = "python",
+        project_id: Optional[str] = None
     ) -> AgentMessage:
         """
-        Generates deployment configurations (Dockerfile, docker-compose.yml).
-
-        Reads code_repo to determine the correct base image and build steps (Req 21.1).
-        Selects base image by language (Req 21.2).
-        Falls back to Language_Config when code_repo is empty (Req 21.3).
+        Generates deployment configurations (Dockerfile, docker-compose.yml, etc).
         """
-        if not code_repo:
-            logger.warning("DevOpsAgent.prepare_deployment: code_repo is empty — falling back to Language_Config base image.")
-
         base_image = self._select_base_image(language, code_repo)
 
+        # Context Extraction (Req 21.1 / BUG-DEV-1)
+        file_list = []
+        deps_content = ""
+        if code_repo:
+            file_list = list(code_repo.keys())
+            # Try to find dependency files for better Docker layer caching
+            dep_files = ["requirements.txt", "package.json", "pom.xml", "build.gradle"]
+            for f in dep_files:
+                if f in code_repo:
+                    deps_content += f"\nFILE: {f}\n{code_repo[f][:1000]}\n"
+
         system_prompt = f"""You are an expert DevOps Engineer.
-        Your goal is to generate the necessary deployment configuration files for the project.
+        Generate deployment configuration files for a {language} project.
+        
+        BASE IMAGE: {base_image}
+        
+        You MUST generate the following files:
+        1. `Dockerfile`: Optimized for production (multi-stage build if applicable).
+        2. `docker-compose.yml`: For the app + dependencies (DB, Redis, etc) from architecture.
+        3. `.dockerignore`: To exclude venv, node_modules, .git, etc.
+        4. `.env.example`: Template for environment variables.
 
-        The project is written in {language}. Use the following base Docker image: {base_image}
-
-        Generate:
-        1. `Dockerfile`: For the application using the base image above.
-        2. `docker-compose.yml`: For the application and its dependencies (e.g., database, redis).
-
-        Return the result as a JSON object where keys are filenames and values are file content.
-        Example:
+        Return ONLY a JSON object:
         {{
-            "Dockerfile": "FROM {base_image}...",
-            "docker-compose.yml": "version: '3.8'..."
+            "Dockerfile": "...",
+            "docker-compose.yml": "...",
+            ".dockerignore": "...",
+            ".env.example": "...",
+            "explanation": "Summary of deployment strategy"
         }}
         """
 
-        user_prompt = f"Here is the system architecture:\n\n{architecture}"
-        if code_repo:
-            # Provide a brief summary of the repo structure for context
-            file_list = ", ".join(list(code_repo.keys())[:10])
-            user_prompt += f"\n\nProject files: {file_list}"
+        user_prompt = f"""
+        Architecture: {json.dumps(architecture, indent=2)}
+        
+        Files in Repository: {", ".join(file_list)}
+        
+        Dependency Context:
+        {deps_content}
+        """
 
         messages = [
             LLMMessage(role="system", content=system_prompt),
             LLMMessage(role="user", content=user_prompt)
         ]
 
+        # Low temp for JSON stability
         response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
 
-        deployment_data = response.content
-        if isinstance(deployment_data, str):
-            try:
-                deployment_data = deployment_data.replace("```json", "").replace("```", "").strip()
-                deployment_data = json.loads(deployment_data)
-            except Exception:
-                deployment_data = {}
+        # Robust JSON Parsing (BUG-DEV-2)
+        try:
+            content = response.content
+            if "```" in content:
+                content = re.sub(r'```[a-z]*\n|```', '', content).strip()
+            # Handle list-of-dicts or direct dict
+            if isinstance(content, str):
+                deployment_data = json.loads(content)
+            else:
+                deployment_data = content
+                
+            logger.info(f"DevOpsAgent successfully generated {len(deployment_data.keys())} files.")
+        except Exception as e:
+            logger.error(f"DevOps Agent failed to parse deployment JSON: {e}")
+            deployment_data = {
+                "error": "Failed to generate deployment config",
+                "raw_response": response.content[:500]
+            }
 
         return AgentMessage(
             sender=self.agent_type,
-            recipient=AgentType.ENGINEER,
+            recipient=AgentType.ORCHESTRATOR, # Corrected recipient (HIGH-DEV-2)
             message_type=MessageType.TASK,
             payload=deployment_data,
         )

@@ -6,21 +6,48 @@ from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.factory import LLMProviderFactory
 from foundry.llm.base import LLMMessage
 from foundry.config import settings
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ArchitectAgent(Agent):
     """
     Architect Agent responsible for system design and technology selection.
     """
 
+    def _extract_json(self, content: str) -> Dict[str, Any]:
+        """Robuster JSON extraction with outermost brace logic."""
+        # 1. Strip markdown fences if present
+        stripped = re.sub(r"^```(?:json)?\n?", "", content.strip(), flags=re.MULTILINE)
+        stripped = re.sub(r"\n?```$", "", stripped.strip(), flags=re.MULTILINE)
+        
+        # 2. Try direct load
+        try:
+            return json.loads(stripped.strip())
+        except json.JSONDecodeError:
+            # 3. Greedy match for outermost { ... }
+            match = re.search(r'(\{.*\})', stripped, re.DOTALL)
+            if match:
+                try:
+                    # Clean trailing commas
+                    cleaned = re.sub(r",\s*([}\]])", r"\1", match.group(1))
+                    return json.loads(cleaned)
+                except json.JSONDecodeError:
+                    pass
+            
+            # 4. Last resort: simple regex for projectName
+            name_match = re.search(r'"project_name":\s*"([^"]+)"', stripped)
+            return {
+                "project_name": name_match.group(1) if name_match else "Architecture Draft",
+                "tech_stack": {"backend": "Target Framework", "language": "Target Language"},
+                "file_structure": {"src": ["main.py"]},
+                "raw_content": stripped[:500]
+            }
+
     def _normalize_json(self, content: str) -> str:
-        """Strip markdown fences and trailing commas before JSON parsing."""
-        # Strip markdown fences
-        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", content.strip(), flags=re.MULTILINE)
-        stripped = re.sub(r"\s*```$", "", stripped.strip(), flags=re.MULTILINE)
-        stripped = stripped.strip()
-        # Remove trailing commas before } or ]
-        stripped = re.sub(r",\s*([}\]])", r"\1", stripped)
-        return stripped
+        """Kept for backward internal compatibility; preferred _extract_json."""
+        data = self._extract_json(content)
+        return json.dumps(data)
 
     def __init__(self, model_name: Optional[str] = None):
         model_name = model_name or settings.ollama_model_name
@@ -40,24 +67,39 @@ class ArchitectAgent(Agent):
             requirements = message.payload.get("requirements", "")
             language = message.payload.get("language", "python")
             framework = message.payload.get("framework", "")
+            project_id = message.payload.get("project_id", "unknown")
             if not prd:
                 return None
-            return await self.design_architecture(prd, requirements, language, framework)
+            return await self.design_architecture(prd, requirements, language, framework, project_id)
         return None
 
-    async def design_architecture(self, prd_content: str, requirements: str = "", language: str = "python", framework: str = "") -> AgentMessage:
+    async def design_architecture(self, prd_content: str, requirements: str = "", language: str = "python", framework: str = "", project_id: str = "unknown") -> AgentMessage:
         """
         Design system architecture based on PRD.
         """
         from foundry.utils.language_config import get_language_config
         lang_config = get_language_config(language)
-        lang_name = lang_config["name"].title()
-        web_framework = framework or lang_config["web_framework"]
-        coding_standard = lang_config["coding_standard"]
+        lang_name = lang_config.name.title()
+        web_framework = framework or (lang_config.web_frameworks[0] if lang_config.web_frameworks else "")
+        coding_standard = lang_config.coding_standard
+
+        # Fetch architectural patterns from KG if available (Fix ARCH-Patterns)
+        kg_context = ""
+        if self.kg_tools:
+            try:
+                patterns = await self.kg_tools.get_successful_patterns(language, web_framework)
+                if patterns:
+                    kg_context = "\nPAST SUCCESSFUL PATTERNS FROM KG:\n"
+                    for p in patterns:
+                        snippet = (p.get("code_snippet") or "")[:300]
+                        kg_context += f"- [{p.get('name')}] {p.get('description')}\n  Snippet: {snippet}\n"
+            except Exception as e:
+                logger.warning(f"Failed to fetch patterns from KG: {e}")
 
         grounding_anchor = f"\nABSOLUTE DOMAIN: {requirements}\n" if requirements else ""
         system_prompt = (
             f"You are an expert {lang_name} System Architect.{grounding_anchor}\n"
+            f"{kg_context}\n"
             f"Design a robust, scalable system architecture based on the provided PRD.\n\n"
             f"Target language: {lang_name}\n"
             f"Preferred framework: {web_framework}\n"
@@ -67,8 +109,15 @@ class ArchitectAgent(Agent):
             "2. Technology Stack Selection (use the target language and framework above)\n"
             "3. Database Schema Design (Entities and Relationships)\n"
             "4. API Interface Definition (Endpoints)\n"
-            f"5. File Structure (use {lang_config['extension']} extensions for source files)\n\n"
-            "Return the result as a JSON object."
+            f"5. File Structure (use {lang_config.extensions[0]} extensions for source files)\n\n"
+            "Return the result as a JSON object strictly following this template:\n"
+            "{\n"
+            '  "high_level_design": "Overall system pattern",\n'
+            '  "tech_stack": {"backend": "...", "database": "..."},\n'
+            '  "data_model": [{"entity": "Name", "attributes": ["attr1"]}],\n'
+            '  "api_endpoints": [{"path": "/...", "method": "GET", "description": "..."}],\n'
+            '  "file_structure": ["path/to/file.ext"]\n'
+            "}"
         )
 
         messages = [
@@ -81,34 +130,28 @@ class ArchitectAgent(Agent):
         for attempt in range(2):
             response = await self.llm.generate(messages, temperature=0.2)
             architecture_content = response.content
-            normalized = self._normalize_json(architecture_content)
-            # Second pass: validate the corrected output before returning
-            if attempt == 1:
-                # Final validation — try to parse; fall back to language-aware fallback if still broken
-                try:
-                    json.loads(normalized)
-                    architecture_content = normalized
-                except json.JSONDecodeError:
-                    architecture_content = self._language_fallback_architecture(prd_content, language, lang_name, web_framework)
+            try:
+                # Use robust extraction
+                arch_dict = self._extract_json(architecture_content)
+                # Schema Validation & Auto-fix
+                arch_dict = self._validate_and_fix_arch_schema(arch_dict, language, web_framework)
+                architecture_content = json.dumps(arch_dict, indent=2)
                 break
-            # Check if the architecture looks reasonable (non-empty JSON-ish)
-            if normalized.startswith("{"):
-                try:
-                    json.loads(normalized)
-                    architecture_content = normalized
-                    break
-                except json.JSONDecodeError:
-                    pass
-            # Trigger self-correction
-            messages.append(LLMMessage(role="assistant", content=architecture_content))
-            messages.append(LLMMessage(
-                role="user",
-                content=(
-                    f"The previous response was not valid JSON. "
-                    f"Please rewrite the architecture as a valid JSON object for a "
-                    f"{lang_name} project using {web_framework}."
-                )
-            ))
+            except Exception:
+                if attempt == 1:
+                    # Final fallback
+                    architecture_content = self._language_fallback_architecture(prd_content, language, lang_name, web_framework)
+                else:
+                    # Trigger self-correction
+                    messages.append(LLMMessage(role="assistant", content=architecture_content))
+                    messages.append(LLMMessage(
+                        role="user",
+                        content=(
+                            f"The previous response was not valid JSON. "
+                            f"Please rewrite the architecture as a valid JSON object for a "
+                            f"{lang_name} project using {web_framework}."
+                        )
+                    ))
 
         # Only apply sanitization for Python projects (non-Python projects keep their terms)
         if language.lower() == "python":
@@ -118,18 +161,16 @@ class ArchitectAgent(Agent):
         if self.kg_tools:
             try:
                 from foundry.services.knowledge_graph import knowledge_graph_service
-                project_id = prd_content[:36] if len(prd_content) >= 36 else "unknown"
                 await knowledge_graph_service.store_architecture_decision(
                     project_id=project_id,
                     title=f"Architecture for {lang_name} project",
-                    decision=architecture_content[:500],
+                    decision=architecture_content[:3000],
                     rationale=f"Generated by ArchitectAgent using {web_framework}",
                     language=language,
                     framework=web_framework,
                 )
             except Exception as e:
-                import logging as _log
-                _log.getLogger(__name__).warning(f"store_architecture_decision failed (non-blocking): {e}")
+                logger.warning(f"store_architecture_decision failed (non-blocking): {e}")
 
         return AgentMessage(
             sender=self.agent_type,
@@ -138,9 +179,30 @@ class ArchitectAgent(Agent):
             payload={"architecture": architecture_content, "prd": prd_content}
         )
 
-    def _is_non_python_stack(self, content: str) -> bool:
-        """Kept for backward compatibility — no longer used in design_architecture."""
-        return False
+    async def _architect_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Node for Architect agent. Kept for LangGraph."""
+        return {}
+
+    def _validate_and_fix_arch_schema(self, arch: Dict[str, Any], language: str, framework: str) -> Dict[str, Any]:
+        """Ensures the architecture has critical fields for the engineer."""
+        required_fields = {
+            "high_level_design": "Standard monolothic architecture",
+            "tech_stack": {"language": language, "framework": framework},
+            "data_model": [],
+            "api_endpoints": [],
+            "file_structure": []
+        }
+        
+        for field, default in required_fields.items():
+            if field not in arch or not arch[field]:
+                arch[field] = default
+        
+        # If file_structure is empty, try to hallucinate a basic one based on tech stack
+        if not arch["file_structure"]:
+            ext = ".py" if language.lower() == "python" else ".js"
+            arch["file_structure"] = [f"src/main{ext}", f"src/models{ext}", "requirements.txt" if language.lower() == "python" else "package.json"]
+            
+        return arch
 
     def _sanitize_architecture_for_engineer(self, arch_str: str) -> str:
         """Translates JS terms for Python-only projects."""
@@ -160,13 +222,13 @@ class ArchitectAgent(Agent):
         """Generate a language-aware fallback architecture when LLM output is unparseable."""
         from foundry.utils.language_config import get_language_config
         lang_config = get_language_config(language)
-        ext = lang_config["extension"]
-        pkg_mgr = lang_config["package_manager"]
+        ext = lang_config.extensions[0]
+        package_file = lang_config.package_file
         return (
             '{\n'
             f'  "projectName": "{lang_name} Fallback Project",\n'
             f'  "techStack": {{"backend": "{web_framework}", "language": "{lang_name}"}},\n'
-            f'  "fileStructure": {{"src": ["main{ext}", "models{ext}", "utils{ext}"], "root": ["{pkg_mgr}.json" if pkg_mgr == "npm" else "requirements.txt", "README.md"]}}\n'
+            f'  "fileStructure": {{"src": ["main{ext}", "models{ext}", "utils{ext}"], "root": ["{package_file}", "README.md"]}}\n'
             '}'
         )
 
@@ -290,19 +352,19 @@ Technology Stack:
             "decisions": [
                 {
                     "id": "ADR-001",
-                    "title": "Selection of React for Frontend",
+                    "title": "Database Choice",
                     "status": "accepted",
-                    "context": "Need a modern, component-based UI framework...",
-                    "decision": "Use React with TypeScript for frontend development",
-                    "rationale": "Large ecosystem, strong typing, team expertise...",
+                    "context": "Need to store relational data for the application...",
+                    "decision": "Use PostgreSQL for data persistence",
+                    "rationale": "Strong consistency, relational features, and team familiarity.",
                     "consequences": {
-                        "positive": ["Fast development", "Rich ecosystem"],
-                        "negative": ["Learning curve for new developers"]
+                        "positive": ["Reliability", "ACID compliance"],
+                        "negative": ["Slightly higher setup complexity"]
                     },
-                    "alternatives": ["Vue.js", "Angular", "Svelte"],
+                    "alternatives": ["SQLite", "MongoDB"],
                     "trade_offs": {
-                        "optimizing_for": ["Developer productivity", "Maintainability"],
-                        "sacrificing": ["Bundle size", "Initial learning curve"]
+                        "optimizing_for": ["Data integrity", "Scalability"],
+                        "sacrificing": ["Initial development speed"]
                     }
                 }
             ]

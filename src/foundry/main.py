@@ -203,6 +203,7 @@ async def create_project(
     request: ProjectCreateRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
 ):
     """Create a new project and start generation in the background."""
 
@@ -238,6 +239,7 @@ async def list_projects(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
 ):
     """List all projects with pagination."""
     result = await db.execute(
@@ -259,7 +261,11 @@ async def list_projects(
 
 
 @app.get("/projects/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: UUID, db: AsyncSession = Depends(get_db)):
+async def get_project(
+    project_id: UUID, 
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
+):
     """Get full project details by ID."""
     result = await db.execute(
         select(Project).where(Project.id == project_id)
@@ -283,7 +289,11 @@ async def get_project(project_id: UUID, db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/projects/{project_id}/artifacts", response_model=List[ArtifactResponse])
-async def get_project_artifacts(project_id: UUID, db: AsyncSession = Depends(get_db)):
+async def get_project_artifacts(
+    project_id: UUID, 
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
+):
     """Get all generated artifacts for a project."""
     # Verify project exists
     proj = await db.execute(
@@ -311,7 +321,11 @@ async def get_project_artifacts(project_id: UUID, db: AsyncSession = Depends(get
 
 
 @app.delete("/projects/{project_id}", status_code=204)
-async def delete_project(project_id: UUID, db: AsyncSession = Depends(get_db)):
+async def delete_project(
+    project_id: UUID, 
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
+):
     """Delete a project and all its artifacts."""
     result = await db.execute(
         select(Project).where(Project.id == project_id)
@@ -326,7 +340,11 @@ async def delete_project(project_id: UUID, db: AsyncSession = Depends(get_db)):
 # ---- Approval Workflow ---- #
 
 @app.get("/projects/{project_id}/approval", response_model=Optional[ApprovalResponse])
-async def get_approval_status(project_id: UUID, db: AsyncSession = Depends(get_db)):
+async def get_approval_status(
+    project_id: UUID, 
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
+):
     """Get the latest approval request for a project."""
     result = await db.execute(
         select(ApprovalRequest)
@@ -348,7 +366,12 @@ async def get_approval_status(project_id: UUID, db: AsyncSession = Depends(get_d
 
 
 @app.post("/projects/{project_id}/approve", response_model=ApprovalResponse)
-async def approve_project(project_id: UUID, decision: ApprovalDecision, db: AsyncSession = Depends(get_db)):
+async def approve_project(
+    project_id: UUID, 
+    decision: ApprovalDecision, 
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
+):
     """Approve the pending gate for a project."""
     result = await db.execute(
         select(ApprovalRequest)
@@ -379,7 +402,12 @@ async def approve_project(project_id: UUID, decision: ApprovalDecision, db: Asyn
 
 
 @app.post("/projects/{project_id}/reject", response_model=ApprovalResponse)
-async def reject_project(project_id: UUID, decision: ApprovalDecision, db: AsyncSession = Depends(get_db)):
+async def reject_project(
+    project_id: UUID, 
+    decision: ApprovalDecision, 
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
+):
     """Reject the pending gate for a project."""
     result = await db.execute(
         select(ApprovalRequest)
@@ -421,7 +449,11 @@ async def reject_project(project_id: UUID, decision: ApprovalDecision, db: Async
 # ---- Agent Orchestration ---- #
 
 @app.get("/projects/{project_id}/agent/status", response_model=AgentStatusResponse)
-async def get_agent_status(project_id: UUID, db: AsyncSession = Depends(get_db)):
+async def get_agent_status(
+    project_id: UUID, 
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
+):
     """Get current agent execution status for a project."""
     # Verify project exists
     result = await db.execute(
@@ -453,6 +485,7 @@ async def pause_agent_execution(
     project_id: UUID,
     request: AgentControlRequest,
     db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
 ):
     """Pause agent execution for a project."""
     # Verify project exists
@@ -481,7 +514,11 @@ async def pause_agent_execution(
 
 
 @app.post("/projects/{project_id}/agent/resume", response_model=AgentControlResponse)
-async def resume_agent_execution(project_id: UUID, db: AsyncSession = Depends(get_db)):
+async def resume_agent_execution(
+    project_id: UUID, 
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
+):
     """Resume agent execution for a project."""
     # Verify project exists
     result = await db.execute(
@@ -511,6 +548,7 @@ async def cancel_agent_execution(
     project_id: UUID,
     request: AgentControlRequest,
     db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
 ):
     """Cancel agent execution and optionally rollback."""
     # Verify project exists
@@ -539,7 +577,8 @@ async def cancel_agent_execution(
 @app.post("/api-keys", response_model=APIKeyCreateResponse, status_code=201)
 async def create_api_key(
     request: APIKeyCreateRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
 ):
     """Create a new API key.
     

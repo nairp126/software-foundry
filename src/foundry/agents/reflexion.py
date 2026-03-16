@@ -7,6 +7,8 @@ Implements the Execute → Analyze → Fix → Retry → Escalate workflow for c
 from typing import Dict, Any, List, Optional
 import json
 import logging
+import os
+import re
 
 from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.base import LLMMessage
@@ -41,7 +43,7 @@ class ReflexionEngine(Agent):
     5. Escalate: Hand off to human if max retries exceeded
     """
     
-    MAX_RETRY_ATTEMPTS = 5  # As per Requirement 5.5
+    MAX_RETRY_ATTEMPTS = 2  # Reduced to allow orchestrator outer loop to handle escalation (BUG-REFX-3)
     
     def __init__(self, model_name: Optional[str] = None):
         super().__init__(AgentType.REFLEXION, model_name=model_name)
@@ -53,9 +55,8 @@ class ReflexionEngine(Agent):
         
         # Knowledge Graph integration
         try:
-            from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
             self.kg_tools = KnowledgeGraphTools()
-        except ImportError:
+        except Exception:
             self.kg_tools = None
         
     async def process_message(self, message: AgentMessage) -> AgentMessage:
@@ -244,13 +245,11 @@ class ReflexionEngine(Agent):
         return fixes
     
     async def _generate_llm_fixes(
-        self, analysis: ErrorAnalysis, code_content: str
+        self, analysis: ErrorAnalysis, code_content: str, language: str = "python"
     ) -> List[CodeFix]:
-        """Generate fixes using LLM."""
-        system_prompt = """You are an expert code debugger and fixer.
-
-        Analyze the error and provide corrected code.
-        Use the same language and framework as the original code.
+        """Generate fixes using LLM (Fallback)."""
+        system_prompt = f"""You are an expert code debugger and fixer.
+        Analyze the error and provide corrected code for the {language} file.
 
         Provide ONLY the corrected code without any explanations or markdown formatting.
         """
@@ -259,9 +258,6 @@ class ReflexionEngine(Agent):
         Error Type: {analysis.error_type}
         Error Message: {analysis.error_message}
         Root Cause: {analysis.root_cause}
-        
-        Suggested Fixes:
-        {chr(10).join(f"- {fix}" for fix in analysis.suggested_fixes)}
         
         Original Code:
         ```
@@ -277,19 +273,16 @@ class ReflexionEngine(Agent):
         ]
         
         response = await self.llm.generate(messages, temperature=0.3)
-        
-        # Extract code from response
         fixed_code = response.content.strip()
         
-        # Remove markdown code blocks if present
-        if fixed_code.startswith("```"):
-            lines = fixed_code.split("\n")
-            fixed_code = "\n".join(lines[1:-1]) if len(lines) > 2 else fixed_code
+        # Clean markdown
+        if "```" in fixed_code:
+            fixed_code = re.sub(r'```[a-z]*\n|```', '', fixed_code).strip()
         
         return [
             CodeFix(
                 fix_type="replace",
-                target_file="main.py",
+                target_file="main.py", # Fallback filename
                 line_number=None,
                 original_code=code_content,
                 fixed_code=fixed_code,
@@ -467,68 +460,67 @@ class ReflexionEngine(Agent):
             # Analyze errors
             analysis = await self.analyze_errors(result)
             
-            # Include feedback if available
+            # Enrich feedback with context
             error_context = f"Error: {analysis.error_message}\nRoot Cause: {analysis.root_cause}"
             if feedback:
-                error_context += f"\nAdditional Feedback: {feedback}"
+                error_context += f"\nAdditional Context: {feedback}"
 
-            # Generate fixes
-            # For multi-file, we currently focus on the entry point or use LLM to decide
-            # Simplified for now: use LLM to generate a fix plan for the repo
-            system_prompt = """You are an expert code debugger.
-            Analyze the error and the project files.
-            Provide a fix plan to resolve the issue.
-            Use the same language and framework as the original code.
-
-            Since you are in a self-healing loop, respond with the 'fix_plan' string only.
+            # Step 4: Generate a structured Fix Plan for the WHOLE REPO (HIGH-REFX-1)
+            system_prompt = f"""You are a Lead Software Engineer. Resolve the following {language} execution error.
+            
+            Respond ONLY with a JSON fix plan in this format:
+            {{
+                "files": {{
+                    "filename.py": "...full corrected file content..."
+                }},
+                "explanation": "Short summary of the changes"
+            }}
             """
             
             user_prompt = f"""
-            Project Files:
+            Current Project Files:
             {json.dumps(current_repo, indent=2)}
             
-            Execution Error:
+            Execution Failure:
             {error_context}
-            
-            Please provide a fix plan to resolve this.
             """
             
-            # KG Context Integration
-            kg_context = ""
-            if self.kg_tools:
-                try:
-                    # Try to get impact analysis for the entry point or failing file
-                    focus_file = entry_point
-                    component_name = os.path.basename(focus_file).split('.')[0]
-                    impact_data = await self.kg_tools.analyze_change_impact(
-                        project_id=project_id,
-                        component_name=component_name
-                    )
-                    kg_context = f"\n\nKNOWLEDGE GRAPH IMPACT ANALYSIS:\n{self.kg_tools.format_for_llm(impact_data)}\n"
-                except Exception as e:
-                    print(f"KG Impact analysis failed: {e}")
-
             messages = [
                 LLMMessage(role="system", content=system_prompt),
-                LLMMessage(role="user", content=f"{user_prompt}{kg_context}")
+                LLMMessage(role="user", content=user_prompt)
             ]
             
-            response = await self.llm.generate(messages, temperature=0.3)
-
-            fix_plan = response.content
+            # Use lower temp for fix plans to ensure JSON validity
+            response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
             
-            # Return to engineer with fix plan
-            return AgentMessage(
-                sender=self.agent_type,
-                recipient=AgentType.ENGINEER,
-                message_type=MessageType.TASK,
-                payload={
-                    "status": "needs_fixes",
-                    "fix_plan": fix_plan,
-                    "error": error_context,
-                    "execution_history": execution_history
-                }
-            )
+            try:
+                # Clean and parse JSON
+                content = response.content
+                if "```" in content:
+                    content = re.sub(r'```[a-z]*\n|```', '', content).strip()
+                fix_plan_dict = json.loads(content)
+                
+                # Apply the fixes to our repository (Self-healing!)
+                current_repo = self._apply_fix_plan_to_repo(current_repo, fix_plan_dict)
+                logger.info(f"Reflexion applied fix plan covering {len(fix_plan_dict.get('files', {}))} files.")
+                
+            except Exception as e:
+                logger.error(f"Failed to apply reflexion fix plan: {e}")
+                # If we fail to parse, we exit this cycle so orchestrator can retry or move on
+                break
+
+        # Max retries exceeded or parsing error
+        return AgentMessage(
+            sender=self.agent_type,
+            recipient=AgentType.ENGINEER,
+            message_type=MessageType.TASK, # Return to engineer to let them decide next step
+            payload={
+                "status": "needs_fixes",
+                "code_repo": current_repo,
+                "execution_history": execution_history,
+                "error": error_context if 'error_context' in locals() else "Unknown failure"
+            }
+        )
         
         # Max retries exceeded
         return AgentMessage(
@@ -599,10 +591,11 @@ class ReflexionEngine(Agent):
         kg_context = ""
         if self.kg_tools:
             try:
-                # Use a general project-level context for review reflection
+                # Use actual project_id from review (Req 16.5 / HIGH-REFX-3)
+                project_id = code_review.get("project_id") or "current"
                 context_data = await self.kg_tools.get_component_context(
-                    project_id="current",
-                    component_name="main" # Default focus for legacy mode
+                    project_id=project_id,
+                    component_name="main"
                 )
                 kg_context = f"\n\nKNOWLEDGE GRAPH ARCHITECTURAL CONTEXT:\n{self.kg_tools.format_for_llm(context_data)}\n"
             except Exception as e:

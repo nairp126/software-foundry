@@ -31,6 +31,16 @@ async def get_api_key(
     if not api_key:
         return None
     
+    # First check for static master key if configured
+    from foundry.config import settings
+    if settings.foundry_api_key and api_key == settings.foundry_api_key:
+        # Return a mock APIKey object for the master key
+        return APIKey(
+            name="Master Key (Static)",
+            key_prefix="master",
+            is_active=True
+        )
+
     # Extract key hash
     key_hash = APIKey.hash_key(api_key)
     

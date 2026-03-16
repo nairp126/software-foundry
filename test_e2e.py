@@ -25,6 +25,10 @@ import sys
 import time
 
 BASE_URL = "http://127.0.0.1:8000"
+API_KEY = "foundry_master_key_2024"
+
+def get_headers():
+    return {"X-API-Key": API_KEY}
 
 # Expected artifacts after a successful run
 EXPECTED_ARTIFACTS = {
@@ -54,7 +58,7 @@ PIPELINE_STAGES = [
 
 def check_health():
     print("=== Health Check ===")
-    resp = requests.get(f"{BASE_URL}/health", timeout=5)
+    resp = requests.get(f"{BASE_URL}/health", timeout=5, headers=get_headers())
     assert resp.status_code == 200, f"Health check failed: {resp.status_code}"
     assert resp.json()["status"] == "healthy"
     print(f"  OK — {resp.json()}")
@@ -70,7 +74,7 @@ def create_project(name: str, requirements: str, language: str = "python", frame
     if framework:
         payload["framework"] = framework
 
-    resp = requests.post(f"{BASE_URL}/projects", json=payload, timeout=10)
+    resp = requests.post(f"{BASE_URL}/projects", json=payload, timeout=10, headers=get_headers())
     assert resp.status_code == 201, f"Create failed: {resp.status_code} — {resp.text}"
 
     project = resp.json()
@@ -87,14 +91,14 @@ def poll_until_done(project_id: str, timeout_seconds: int = 1200) -> str:
     deadline = time.time() + timeout_seconds
 
     while time.time() < deadline:
-        resp = requests.get(f"{BASE_URL}/projects/{project_id}", timeout=10)
+        resp = requests.get(f"{BASE_URL}/projects/{project_id}", timeout=60, headers=get_headers())
         assert resp.status_code == 200, f"Get project failed: {resp.status_code}"
         data = resp.json()
         status = data["status"]
 
         if status not in seen_statuses:
             elapsed = int(time.time() - (deadline - timeout_seconds))
-            print(f"  [{elapsed:>4}s] → {status}")
+            print(f"  [{elapsed:>4}s] -> {status}")
             seen_statuses.add(status)
 
         if status in ("completed", "failed"):
@@ -108,7 +112,7 @@ def poll_until_done(project_id: str, timeout_seconds: int = 1200) -> str:
 
 def check_artifacts(project_id: str) -> list:
     print(f"\n=== Artifacts ===")
-    resp = requests.get(f"{BASE_URL}/projects/{project_id}/artifacts", timeout=10)
+    resp = requests.get(f"{BASE_URL}/projects/{project_id}/artifacts", timeout=10, headers=get_headers())
     assert resp.status_code == 200, f"Artifacts fetch failed: {resp.status_code}"
     artifacts = resp.json()
 
@@ -143,7 +147,7 @@ def check_artifacts(project_id: str) -> list:
 def check_project_fields(project_id: str):
     """Verify the project record has prd/architecture populated."""
     print(f"\n=== Project Fields ===")
-    resp = requests.get(f"{BASE_URL}/projects/{project_id}", timeout=10)
+    resp = requests.get(f"{BASE_URL}/projects/{project_id}", timeout=10, headers=get_headers())
     data = resp.json()
     for field in ("prd", "architecture", "code_review"):
         val = data.get(field)
