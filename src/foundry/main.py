@@ -1,6 +1,7 @@
 """FastAPI application entry point."""
 
 import asyncio
+import logging
 import subprocess
 import sys
 from contextlib import asynccontextmanager
@@ -60,6 +61,7 @@ from foundry.api.schemas import (
     ValidationErrorDetail,
 )
 
+logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ #
 #  Application
@@ -74,10 +76,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize Knowledge Graph
     try:
         await knowledge_graph_service.initialize()
-        print("Knowledge Graph initialized successfully")
+        logger.info("Knowledge Graph initialized successfully")
     except Exception as e:
-        print(f"Warning: Failed to initialize Knowledge Graph: {e}")
-        print("Application will continue without Knowledge Graph support")
+        logger.warning(f"Failed to initialize Knowledge Graph: {e}")
+        logger.info("Application will continue without Knowledge Graph support")
     
     # Check for pending migrations
     try:
@@ -91,11 +93,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             check=False
         )
         if result.returncode != 0:
-            print(f"WARNING: Database migrations are not up to date!\n{result.stderr or result.stdout}")
+            logger.warning(f"Database migrations are not up to date!\n{result.stderr or result.stdout}")
         else:
-            print("Database migrations are up to date.")
+            logger.info("Database migrations are up to date.")
     except Exception as e:
-        print(f"Warning: Could not check migration status: {e}")
+        logger.warning(f"Could not check migration status: {e}")
     
     yield
     await knowledge_graph_service.disconnect()
@@ -188,14 +190,17 @@ async def general_exception_handler(request: Request, exc: Exception):
 #  Background runner
 # ------------------------------------------------------------------ #
 
-async def _run_project_background(project_id: str, requirements: str) -> None:
+async def _run_project_background(project_id: str, requirements: str, language: str = "python", framework: Optional[str] = None) -> None:
     """Background task that drives the orchestrator pipeline."""
     try:
         # Fix K: Instantiate fresh orchestrator for every project to avoid memory contamination
         orchestrator = AgentOrchestrator()
-        await orchestrator.run(project_id=str(project_id), initial_prompt=requirements)
+        await orchestrator.run(
+            project_id=str(project_id), 
+            initial_prompt=requirements
+        )
     except Exception as exc:
-        print(f"[ERROR] Project {project_id} failed: {exc}")
+        logger.error(f"Project {project_id} failed: {exc}")
 
 
 # ------------------------------------------------------------------ #
@@ -250,23 +255,32 @@ async def create_project(
         updated_at=project.updated_at,
     )
 
-    background_tasks.add_task(_run_project_background, project_id, request.requirements)
+    background_tasks.add_task(
+        _run_project_background, 
+        project_id, 
+        request.requirements,
+        language=request.language or "python",
+        framework=request.framework
+    )
     return response
 
 
 @app.get("/projects", response_model=List[ProjectListItem])
 async def list_projects(
+    name: Optional[str] = Query(None, description="Filter by project name"),
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     api_key: APIKey = Depends(require_api_key),
 ):
-    """List all projects with pagination."""
+    """List all projects with pagination and optional name filter."""
+    query = select(Project).order_by(Project.created_at.desc())
+    
+    if name:
+        query = query.where(Project.name.ilike(f"%{name}%"))
+        
     result = await db.execute(
-        select(Project)
-        .order_by(Project.created_at.desc())
-        .offset(skip)
-        .limit(limit)
+        query.offset(skip).limit(limit)
     )
     projects = result.scalars().all()
     return [
@@ -555,10 +569,25 @@ async def resume_agent_execution(
     # Resume execution
     resume_result = await agent_control_service.resume_execution(project_id)
     
-    # Update project status (restore to appropriate running state)
-    # TODO: Restore to the correct running state from checkpoint
-    project.status = ProjectStatus.created
+    # Update project status (restore to appropriate running state from checkpoint)
+    checkpoint = await agent_control_service.get_checkpoint(project_id)
+    if checkpoint and checkpoint.get("agent_state", {}).get("current_status"):
+        project.status = ProjectStatus(checkpoint["agent_state"]["current_status"])
+    else:
+        # Fallback to last known running state if possible, otherwise created
+        project.status = ProjectStatus.running_pm
+        
     await db.commit()
+    
+    # Restart background task if it's not already running
+    # In a real system, we'd check if the task is alive, but here we just restart
+    background_tasks.add_task(
+        _run_project_background, 
+        str(project_id), 
+        project.requirements,
+        language=project.language,
+        framework=project.framework
+    )
     
     return AgentControlResponse(**resume_result)
 
@@ -643,7 +672,8 @@ async def create_api_key(
 async def list_api_keys(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
 ):
     """List all API keys (without the actual key values)."""
     result = await db.execute(
@@ -671,7 +701,8 @@ async def list_api_keys(
 @app.delete("/api-keys/{key_id}", status_code=204)
 async def delete_api_key(
     key_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
 ):
     """Delete an API key."""
     result = await db.execute(
@@ -687,7 +718,8 @@ async def delete_api_key(
 @app.patch("/api-keys/{key_id}/deactivate", response_model=APIKeyResponse)
 async def deactivate_api_key(
     key_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(require_api_key),
 ):
     """Deactivate an API key without deleting it."""
     result = await db.execute(
@@ -736,29 +768,46 @@ _ws_connections: Dict[str, Set[WebSocket]] = {}
 
 @app.websocket("/ws/projects/{project_id}")
 async def project_websocket(websocket: WebSocket, project_id: UUID):
-    """WebSocket endpoint for real-time project status updates."""
+    """WebSocket endpoint for real-time project status updates using Redis Pub/Sub."""
     await websocket.accept()
     key = str(project_id)
+    
     if key not in _ws_connections:
         _ws_connections[key] = set()
     _ws_connections[key].add(websocket)
 
+    # Subscribe to project-specific Redis channel
+    pubsub = redis_client.client.pubsub()
+    channel = f"foundry:project:{key}"
+    await pubsub.subscribe(channel)
+
     try:
-        while True:
-            # Poll project status every 2 seconds and push updates
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(
-                    select(Project).where(Project.id == project_id)
-                )
-                project = result.scalar_one_or_none()
-                if project:
-                    await websocket.send_json({
-                        "type": "status_update",
-                        "status": project.status.value,
-                        "updated_at": project.updated_at.isoformat(),
-                    })
-            await asyncio.sleep(2)
+        # Send initial status
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Project).where(Project.id == project_id)
+            )
+            project = result.scalar_one_or_none()
+            if project:
+                await websocket.send_json({
+                    "type": "status_update",
+                    "status": project.status.value,
+                    "updated_at": project.updated_at.isoformat(),
+                    "message": "Connected to project stream."
+                })
+
+        # Listen for events from the orchestrator
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                data = json.loads(message["data"])
+                await websocket.send_json(data)
+                
     except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for project {project_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error for project {project_id}: {e}")
+    finally:
+        await pubsub.unsubscribe(channel)
         _ws_connections[key].discard(websocket)
         if not _ws_connections[key]:
             del _ws_connections[key]

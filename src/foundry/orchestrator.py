@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from sqlalchemy import select
 
@@ -64,6 +65,7 @@ class AgentOrchestrator:
         self.code_review_agent = CodeReviewAgent()
         self.reflexion_agent = ReflexionAgent()
         self.kg_service = KnowledgeGraphService()
+        self._checkpointer = MemorySaver()
         self.graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
@@ -101,11 +103,27 @@ class AgentOrchestrator:
         # End after devops
         workflow.add_edge("devops", END)
 
-        return workflow.compile()
+        return workflow.compile(checkpointer=self._checkpointer)
+
+    async def _publish_status_update(self, project_id: str, status: ProjectStatus, message: str = ""):
+        """Publish status update to Redis for real-time WebSocket broadcasting."""
+        from foundry.redis_client import redis_client
+        if redis_client.client:
+            event_data = {
+                "type": "status_update",
+                "status": status.value,
+                "project_id": project_id,
+                "message": message,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            channel = f"foundry:project:{project_id}"
+            await redis_client.client.publish(channel, json.dumps(event_data))
 
     async def _pm_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Product Manager agent."""
-        await self._update_project_status(state["project_id"], ProjectStatus.running_pm)
+        project_id = state["project_id"]
+        await self._update_project_status(project_id, ProjectStatus.running_pm)
+        await self._publish_status_update(project_id, ProjectStatus.running_pm, "Starting requirements analysis...")
         
         # Get the latest message from the history if any
         user_prompt = state["messages"][-1].content if state["messages"] else ""
@@ -147,7 +165,9 @@ class AgentOrchestrator:
 
     async def _architect_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Architect agent."""
-        await self._update_project_status(state["project_id"], ProjectStatus.running_architect)
+        project_id = state["project_id"]
+        await self._update_project_status(project_id, ProjectStatus.running_architect)
+        await self._publish_status_update(project_id, ProjectStatus.running_architect, "Designing system architecture...")
         
         prd = state["project_context"].get("prd", "")
         requirements = state.get("requirements", "") # Fix L
@@ -189,7 +209,9 @@ class AgentOrchestrator:
 
     async def _engineer_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Engineer agent."""
-        await self._update_project_status(state["project_id"], ProjectStatus.running_engineer)
+        project_id = state["project_id"]
+        await self._update_project_status(project_id, ProjectStatus.running_engineer)
+        await self._publish_status_update(project_id, ProjectStatus.running_engineer, "Generating codebase...")
         
         architecture = state["project_context"].get("architecture", "")
         prd = state["project_context"].get("prd", "")
@@ -275,7 +297,9 @@ class AgentOrchestrator:
 
     async def _code_review_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Code Review agent."""
-        await self._update_project_status(state["project_id"], ProjectStatus.running_code_review)
+        project_id = state["project_id"]
+        await self._update_project_status(project_id, ProjectStatus.running_code_review)
+        await self._publish_status_update(project_id, ProjectStatus.running_code_review, "Analyzing generated code...")
 
         code_repo = state["project_context"].get("code_repo", {})
         language = state.get("language", "python")
@@ -313,9 +337,10 @@ class AgentOrchestrator:
 
     async def _reflexion_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Reflexion engine (self-healing)."""
-        await self._update_project_status(state["project_id"], ProjectStatus.running_reflexion)
-        
         project_id = state["project_id"]
+        await self._update_project_status(project_id, ProjectStatus.running_reflexion)
+        await self._publish_status_update(project_id, ProjectStatus.running_reflexion, "Starting self-healing loop...")
+        
         code_repo = state["project_context"].get("code_repo", {})
         language = state.get("language", "python")
         
@@ -383,7 +408,9 @@ class AgentOrchestrator:
 
     async def _devops_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for DevOps agent."""
-        await self._update_project_status(state["project_id"], ProjectStatus.running_devops)
+        project_id = state["project_id"]
+        await self._update_project_status(project_id, ProjectStatus.running_devops)
+        await self._publish_status_update(project_id, ProjectStatus.running_devops, "Preparing deployment configuration...")
         
         code_repo = state["project_context"].get("code_repo", {})
         architecture = state["project_context"].get("architecture", "")
@@ -551,9 +578,12 @@ class AgentOrchestrator:
             "framework": project_framework,
         }
         
+        # Use project_id as thread_id for LangGraph checkpointer
+        config = {"configurable": {"thread_id": project_id}}
+        
         try:
             final_state = initial_state
-            async for output in self.graph.astream(initial_state):
+            async for output in self.graph.astream(initial_state, config):
                 # We can emit logs or events here for real-time tracking
                 for key, value in output.items():
                     logger.debug(f"Graph node {key} finished")
@@ -562,9 +592,11 @@ class AgentOrchestrator:
                     
             if final_state.get("success_flag"):
                 await self._update_project_status(project_id, ProjectStatus.completed)
+                await self._publish_status_update(project_id, ProjectStatus.completed, "Generation and deployment successful.")
                 logger.info(f"Project {project_id} completed successfully.")
             else:
                 await self._update_project_status(project_id, ProjectStatus.failed)
+                await self._publish_status_update(project_id, ProjectStatus.failed, "Project failed during execution.")
                 logger.warning(f"Project {project_id} ended without reaching successful deployment.")
             return True
         except Exception as e:
