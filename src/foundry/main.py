@@ -1,6 +1,8 @@
 """FastAPI application entry point."""
 
 import asyncio
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, Any, List, Optional, Set
 from uuid import UUID, uuid4
@@ -77,6 +79,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         print(f"Warning: Failed to initialize Knowledge Graph: {e}")
         print("Application will continue without Knowledge Graph support")
     
+    # Check for pending migrations
+    try:
+        # Run alembic check to see if migrations are up to date
+        # Note: In a production environment, you might want to run 'upgrade head'
+        # but for safety we just check and log here.
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "check"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode != 0:
+            print(f"WARNING: Database migrations are not up to date!\n{result.stderr or result.stdout}")
+        else:
+            print("Database migrations are up to date.")
+    except Exception as e:
+        print(f"Warning: Could not check migration status: {e}")
+    
     yield
     await knowledge_graph_service.disconnect()
     await redis_client.disconnect()
@@ -102,7 +122,7 @@ app.add_middleware(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

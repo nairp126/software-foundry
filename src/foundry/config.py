@@ -1,8 +1,9 @@
 """Application configuration management."""
 
-from typing import Optional
-from pydantic import Field
+from typing import Optional, List
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
 
 
 class Settings(BaseSettings):
@@ -23,6 +24,22 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     generated_projects_path: str = Field(default="generated_projects")
     host_generated_projects_path: Optional[str] = Field(default=None) # Path on the actual host (for Docker-in-Docker)
+    cors_origins: List[str] = Field(
+        default=[
+            "http://localhost",
+            "http://localhost:3000",
+            "http://127.0.0.1",
+            "http://127.0.0.1:3000",
+        ]
+    )
+
+    @field_validator("generated_projects_path")
+    @classmethod
+    def validate_projects_path(cls, v: str) -> str:
+        """Ensure generated_projects_path exists."""
+        if not os.path.exists(v):
+            os.makedirs(v, exist_ok=True)
+        return v
 
     # API
     api_host: str = Field(default="0.0.0.0")

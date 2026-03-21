@@ -1,962 +1,1024 @@
-# Autonomous Software Foundry — Agent & Orchestration Audit Report
+# Autonomous Software Foundry — Complete Project Audit Report
 
 > **Date:** March 2026  
-> **Scope:** Full source audit of all 6 agents + orchestrator based on live codebase  
-> **Model in use:** Qwen2.5-Coder-7B via Ollama  
-> **Languages targeted:** Python · JavaScript/Node.js · TypeScript · Java
-
----
-
-## Executive Summary
-
-| Component | File | Implementation Status | Critical Bugs | High Issues | Medium Issues |
-|-----------|------|-----------------------|:---:|:---:|:---:|
-| Orchestrator | `orchestrator.py` | Partial — core flow wired, key bugs remain | 4 | 5 | 3 |
-| Product Manager | `product_manager.py` | Partial — PRD works but schema is thin | 1 | 3 | 3 |
-| Architect | `architect.py` | Partial — multi-pass validation added, still Python-only | 2 | 3 | 2 |
-| Engineer | `engineer.py` | Partial — recovery loop added, still Python-only hardcoded | 3 | 4 | 3 |
-| Code Review | `code_review.py` | Partial — sandbox integration present, key mismatches | 2 | 3 | 2 |
-| Reflexion | `reflexion.py` | Partial — execution loop works, output contract broken | 3 | 3 | 2 |
-| DevOps | `devops.py` | Minimal stub — code_repo ignored, no language awareness | 3 | 2 | 1 |
-
-**Overall assessment:** The pipeline can generate code in limited scenarios but will fail E2E tests in all but the simplest cases due to four compounding issues: state context loss between nodes, the reflexion loop returning a text plan instead of fixed code, all agents being hardcoded to Python-only (blocking multi-language support), and the DevOps agent ignoring the actual code it receives.
+> **Scope:** Full project-wide audit covering all subsystems, services, models, infrastructure, and tooling  
+> **Model:** Qwen2.5-Coder-7B via Ollama (local inference)  
+> **Target languages:** Python · JavaScript/Node.js · TypeScript · Java
 
 ---
 
 ## Table of Contents
 
-1. [Orchestrator](#1-orchestrator)
-2. [Product Manager Agent](#2-product-manager-agent)
-3. [Architect Agent](#3-architect-agent)
-4. [Engineer Agent](#4-engineer-agent)
-5. [Code Review Agent](#5-code-review-agent)
-6. [Reflexion Engine](#6-reflexion-engine)
-7. [DevOps Agent](#7-devops-agent)
-8. [Cross-Cutting Issues](#8-cross-cutting-issues)
-9. [What Has Been Fixed (Since Last Audit)](#9-what-has-been-fixed-since-last-audit)
-10. [Prioritised Fix Checklist](#10-prioritised-fix-checklist)
+1. [Executive Summary & Health Matrix](#1-executive-summary--health-matrix)
+2. [Project Structure Overview](#2-project-structure-overview)
+3. [Core Infrastructure](#3-core-infrastructure)
+4. [API Layer (FastAPI)](#4-api-layer-fastapi)
+5. [Database & Data Models](#5-database--data-models)
+6. [LLM Provider Layer](#6-llm-provider-layer)
+7. [Agent Orchestration](#7-agent-orchestration)
+8. [Agent Implementations](#8-agent-implementations)
+9. [Knowledge Graph Subsystem](#9-knowledge-graph-subsystem)
+10. [Sandbox & Code Execution](#10-sandbox--code-execution)
+11. [Testing & Quality Gates](#11-testing--quality-gates)
+12. [Version Control Integration](#12-version-control-integration)
+13. [Middleware & Security](#13-middleware--security)
+14. [Services Layer](#14-services-layer)
+15. [Utilities & Language Support](#15-utilities--language-support)
+16. [Infrastructure & DevOps Configuration](#16-infrastructure--devops-configuration)
+17. [What Is Missing (Not Yet Built)](#17-what-is-missing-not-yet-built)
+18. [Cross-Cutting Issues](#18-cross-cutting-issues)
+19. [Prioritised Improvements & Fix Checklist](#19-prioritised-improvements--fix-checklist)
 
 ---
 
-## 1. Orchestrator
+## 1. Executive Summary & Health Matrix
 
-**File:** `src/foundry/orchestrator.py`  
-**Class:** `AgentOrchestrator`  
-**Framework:** LangGraph `StateGraph`
+| Subsystem | Files | Status | Completeness | Critical Issues |
+|-----------|-------|--------|:---:|:---:|
+| Core Infrastructure | `database.py`, `config.py`, `redis_client.py` | ✅ Solid | 85% | 0 |
+| API Layer | `main.py`, `api/schemas.py` | ✅ Working | 70% | 2 |
+| Database Models | `models/` | ✅ Working | 75% | 1 |
+| LLM Providers | `llm/` | ✅ Working | 80% | 1 |
+| Orchestrator | `orchestrator.py` | ⚠️ Partial | 55% | 4 |
+| Agent — PM | `agents/product_manager.py` | ⚠️ Partial | 60% | 1 |
+| Agent — Architect | `agents/architect.py` | ⚠️ Partial | 65% | 2 |
+| Agent — Engineer | `agents/engineer.py` | ⚠️ Partial | 60% | 3 |
+| Agent — Code Review | `agents/code_review.py` | ⚠️ Partial | 65% | 2 |
+| Agent — Reflexion | `agents/reflexion.py` | ⚠️ Partial | 55% | 3 |
+| Agent — DevOps | `agents/devops.py` | ❌ Stub | 20% | 3 |
+| Knowledge Graph | `graph/`, `services/knowledge_graph.py`, `tools/` | ✅ Good | 70% | 1 |
+| Sandbox Execution | `sandbox/`, `services/sandbox_service.py` | ⚠️ Partial | 50% | 2 |
+| Testing & QA | `testing/` | ✅ Good | 70% | 0 |
+| Version Control | `vcs/git_manager.py`, `services/git_service.py` | ✅ Good | 75% | 1 |
+| Middleware & Security | `middleware/` | ✅ Good | 75% | 1 |
+| Services Layer | `services/` | ✅ Mostly good | 70% | 1 |
+| Utilities | `utils/` | ✅ Good | 80% | 0 |
+| Test Coverage | `tests/` | ❌ Missing | 5% | — |
+| VS Code Extension | — | ❌ Not started | 0% | — |
+| AWS CDK / Cloud | — | ❌ Not started | 0% | — |
 
-### 1.1 What Is Implemented
+**Overall project completeness: ~58% of MVP scope implemented**
 
-- `GraphState` TypedDict with `messages`, `project_context`, `review_feedback`, `project_id`, `reflexion_count`, `success_flag`
-- Full 6-node LangGraph graph: `product_manager → architect → engineer → code_review → (reflexion | devops | END)`
-- Conditional routing from `code_review` via `_should_continue_from_review`
-- Status updates to PostgreSQL at each node via `_update_project_status`
-- Artifact persistence to filesystem + DB via `_store_artifact`
-- KG ingestion after code generation
-- Write-time gate in `_store_artifact` blocks forbidden extensions and JS content in `.py` files
-- Per-request orchestrator instantiation (avoids cross-project memory pollution)
+**Summary of the most impactful gaps:**
 
-### 1.2 Critical Bugs
-
-#### BUG-ORCH-1 · State merge destroys context at every node transition
-
-**Severity:** CRITICAL — causes all downstream failures
-
-`_pm_node`, `_architect_node`, and `_engineer_node` each return a **fresh** `project_context` dict instead of merging into the existing one. LangGraph uses last-write-wins for all TypedDict keys not annotated with a reducer. The result is that every node transition silently deletes everything added by the previous node.
-
-```python
-# CURRENT — _pm_node wipes everything with a fresh dict:
-return {
-    "project_context": {
-        "prd": prd,
-        "requirements": state.get("requirements", "")
-    }
-}
-
-# CURRENT — _architect_node re-adds prd but drops requirements:
-return {
-    "project_context": {
-        "architecture": architecture,
-        "prd": prd,
-        "requirements": state.get("requirements", "")
-    }
-}
-
-# CURRENT — _engineer_node drops requirements again:
-return {
-    "project_context": {"code_repo": code_repo, "architecture": architecture, "prd": prd}
-}
-```
-
-**Fix:** Every node must use the spread operator:
-
-```python
-return {
-    "project_context": {**state["project_context"], "prd": prd}
-}
-```
-
-**Nodes requiring this fix:** `_pm_node`, `_architect_node`, `_engineer_node`, `_code_review_node`, `_reflexion_node`
-
-Note: `_devops_node` already uses `{**state["project_context"], "deployment": deployment_results}` — this is correct.
+- Four critical orchestrator bugs mean E2E pipeline never completes successfully
+- Zero automated test coverage of the codebase itself
+- VS Code extension (core client) does not exist
+- Resume-from-pause restores project to `created` status instead of the correct running state
+- WebSocket broadcast not connected to actual agent status changes
+- `language` and `framework` not threaded through the full pipeline state
 
 ---
 
-#### BUG-ORCH-2 · `review_feedback` key mismatch — reflexion gets empty context
+## 2. Project Structure Overview
 
-**Severity:** CRITICAL
+### Confirmed existing files and modules
 
-`_reflexion_node` reads:
-
-```python
-review_comments = state["review_feedback"].get("comments", "")
+```
+src/foundry/
+├── agents/
+│   ├── base.py                    ✅ Agent base class, AgentMessage, AgentType
+│   ├── product_manager.py         ✅ Implemented
+│   ├── architect.py               ✅ Implemented
+│   ├── engineer.py                ✅ Implemented
+│   ├── code_review.py             ✅ Implemented
+│   ├── reflexion.py               ✅ Implemented
+│   ├── devops.py                  ⚠️ Minimal stub
+│   └── __init__.py
+├── api/
+│   ├── schemas.py                 ✅ All Pydantic schemas
+│   └── __init__.py
+├── graph/
+│   ├── neo4j_client.py            ✅ Full async Neo4j client
+│   ├── code_parser.py             ✅ Python AST parser + content extraction
+│   ├── ingestion.py               ✅ Multi-language ingestion pipeline
+│   └── __init__.py
+├── llm/
+│   ├── base.py                    ✅ BaseLLMProvider, LLMMessage, LLMResponse
+│   ├── ollama_provider.py         ✅ Full implementation with semaphore + timeout
+│   ├── vllm_provider.py           ✅ Stub with basic structure
+│   ├── factory.py                 ✅ Provider factory
+│   ├── test.py                    ✅ Integration test script
+│   └── __init__.py
+├── middleware/
+│   ├── auth.py                    ✅ API key auth with master key support
+│   ├── rate_limit.py              ✅ Redis sliding window rate limiter
+│   ├── security.py                ✅ Security headers middleware
+│   └── __init__.py
+├── models/
+│   ├── base.py                    ✅ UUID PK, timestamps
+│   ├── project.py                 ✅ Project with language/framework fields
+│   ├── artifact.py                ✅ Artifact storage
+│   ├── approval.py                ✅ Approval workflow models
+│   ├── api_key.py                 ✅ API key with hashing
+│   └── __init__.py
+├── sandbox/
+│   ├── environment.py             ✅ SandboxEnvironment with Docker
+│   ├── error_analysis.py          ✅ ErrorAnalyzer, FixGenerator
+│   └── __init__.py
+├── services/
+│   ├── knowledge_graph.py         ✅ Full KG service
+│   ├── git_service.py             ✅ Basic git init/commit
+│   ├── sandbox_service.py         ✅ Docker-based execution
+│   ├── agent_control.py           ✅ Pause/resume/cancel/checkpoint
+│   └── project_service.py         ✅ Project CRUD with lifecycle
+├── testing/
+│   ├── test_generator.py          ✅ Multi-language test generation
+│   ├── quality_gates.py           ✅ Linting/type/security gates
+│   └── __init__.py
+├── tools/
+│   └── knowledge_graph_tools.py   ✅ Agent-facing KG query tools
+├── utils/
+│   ├── language_config.py         ✅ 4-language config dataclass
+│   ├── language_guards.py         ✅ Language mismatch detection
+│   └── __init__.py
+├── vcs/
+│   └── git_manager.py             ✅ Full GitManager with branching
+├── config.py                      ✅ Pydantic settings
+├── database.py                    ✅ Async SQLAlchemy
+├── main.py                        ✅ Full FastAPI app
+├── orchestrator.py                ✅ LangGraph orchestrator
+└── redis_client.py                ✅ Redis client wrapper
 ```
 
-But `CodeReviewAgent.analyze_code()` returns a payload with key `"feedback"`, not `"comments"`. The reflexion agent always receives an empty string as context and cannot generate targeted fixes.
+### Confirmed missing
+
+```
+tests/                             ❌ No test files exist
+vscode-extension/                  ❌ Not started
+cdk/                               ❌ Not started (AWS CDK)
+alembic/versions/                  ❌ No migration files (only alembic.ini exists)
+docs/                              ✅ OLLAMA_SETUP.md, VLLM_SETUP.md, etc.
+```
+
+---
+
+## 3. Core Infrastructure
+
+### 3.1 Database (`database.py`)
+
+**Status: ✅ Solid**
+
+- Async SQLAlchemy with `asyncpg` driver
+- `get_db()` async generator for FastAPI dependency injection
+- Connection pooling: configurable `pool_size` and `max_overflow`
+- Proper rollback on error, close in finally
+
+**Issues:**
+
+- `echo=settings.debug` logs all SQL in debug mode, including any potentially sensitive query values — acceptable for dev but should be reviewed before production
+
+**Missing:**
+
+- No Alembic migration files exist. The schema is created via `Base.metadata.create_all()` on startup rather than managed migrations. This means schema changes require manual intervention and there is no upgrade path.
+
+**Recommended fix:** Add `alembic init alembic` and generate the initial migration. Add migration check to lifespan startup.
+
+---
+
+### 3.2 Configuration (`config.py`)
+
+**Status: ✅ Good**
+
+- Pydantic `BaseSettings` with environment variable support
+- Covers: database, Redis, Neo4j, Ollama, LLM settings, paths, API keys
+
+**Issues:**
+
+- `CORS allow_origins=["*"]` in `main.py` — wildcard CORS is insecure for production. Should be configurable from settings.
+- No validation that `generated_projects_path` exists at startup
+
+---
+
+### 3.3 Redis (`redis_client.py`)
+
+**Status: ✅ Working**
+
+- Async Redis client with connect/disconnect lifecycle
+- Used by rate limiter, agent control, and checkpointing
+
+**Issues:**
+
+- If Redis is unavailable at startup, the rate limiter silently allows all requests. This is the correct degraded behavior but is not logged as a warning.
+
+---
+
+## 4. API Layer (FastAPI)
+
+### 4.1 Endpoints implemented in `main.py`
+
+| Method | Path | Status | Notes |
+|--------|------|--------|-------|
+| POST | `/projects` | ✅ Working | Creates project, fires background task |
+| GET | `/projects` | ✅ Working | Lists projects with status filter |
+| GET | `/projects/{id}` | ✅ Working | Fetches single project |
+| DELETE | `/projects/{id}` | ✅ Working | Deletes project + artifacts |
+| GET | `/projects/{id}/artifacts` | ✅ Working | Returns all artifacts |
+| GET | `/projects/{id}/approval` | ✅ Working | Get latest approval |
+| POST | `/projects/{id}/approve` | ✅ Working | Approves pending gate |
+| POST | `/projects/{id}/reject` | ✅ Working | Rejects + marks project failed |
+| GET | `/projects/{id}/agent/status` | ✅ Working | Agent status + pause check |
+| POST | `/projects/{id}/agent/pause` | ✅ Working | Sets pause flag in Redis |
+| POST | `/projects/{id}/agent/resume` | ⚠️ Bug | Restores to `created`, not correct state |
+| POST | `/projects/{id}/agent/cancel` | ✅ Working | Cancel + optional rollback |
+| GET | `/ws/projects/{id}` | ⚠️ Partial | WebSocket connected but no broadcast |
+| POST | `/api-keys` | ✅ Working | Creates key, returns plaintext once |
+| GET | `/api-keys` | ✅ Working | Lists keys (no secret) |
+| DELETE | `/api-keys/{id}` | ✅ Working | Deletes key |
+| PATCH | `/api-keys/{id}/deactivate` | ✅ Working | Soft deactivation |
+| GET | `/health` | ✅ Working | Returns healthy |
+
+### 4.2 Critical Issues
+
+#### API-BUG-1 · Resume endpoint restores project to `created` status
+
+```python
+# Current:
+project.status = ProjectStatus.created   # WRONG
+
+# Should be:
+checkpoint = await agent_control_service.get_checkpoint(project_id)
+if checkpoint and checkpoint.get("agent_state", {}).get("current_status"):
+    project.status = ProjectStatus(checkpoint["agent_state"]["current_status"])
+else:
+    project.status = ProjectStatus.created  # fallback only
+```
+
+There is no mechanism to actually resume the LangGraph graph execution from where it paused. Setting status to `created` will cause the project to appear as new. A real resume requires LangGraph checkpointing with `MemorySaver` or a custom checkpoint serializer.
+
+---
+
+#### API-BUG-2 · WebSocket endpoint does not broadcast real-time updates
+
+```python
+@app.websocket("/ws/projects/{project_id}")
+async def project_websocket(websocket: WebSocket, project_id: UUID):
+    # Accepts connection, polls DB every 2 seconds, sends status
+    # But: agent nodes never push events to this channel
+```
+
+The WebSocket polls the database for status — it does not receive events when agents change state. Clients see status changes with up to a 2-second delay and never see intermediate agent events (e.g., "generating file X", "running sandbox", "review passed"). To fix, agents must push events via Redis pub/sub and the WebSocket handler must subscribe.
+
+---
+
+#### API-BUG-3 · `ProjectCreateRequest` does not accept `language` or `framework`
+
+```python
+class ProjectCreateRequest(BaseModel):
+    requirements: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+    approval_policy: Optional[str] = "standard"
+    # language and framework not here
+```
+
+Even though `Project` model has `language` and `framework` columns, the creation endpoint cannot receive them. Every project defaults to Python.
+
+---
+
+#### API-BUG-4 · `_run_project_background` does not pass `language` to orchestrator
+
+```python
+async def _run_project_background(project_id: str, requirements: str) -> None:
+    orchestrator = AgentOrchestrator()
+    await orchestrator.run(project_id=str(project_id), initial_prompt=requirements)
+    # language never passed
+```
+
+---
+
+### 4.3 Medium Issues
+
+- No pagination on `GET /projects` — will be slow with many projects
+- No search/filter by name on project list
+- `approval_policy` stored as string in request but as `ApprovalPolicy` enum in model — no validation bridge
+- Error response for WebSocket disconnect is swallowed silently
+- `deactivate_api_key` endpoint does not require `require_api_key` — any unauthenticated request can deactivate a key by guessing its ID
+
+---
+
+## 5. Database & Data Models
+
+### 5.1 Models
+
+**`Project`** — `models/project.py`
+
+- ✅ UUID primary key via `BaseModel`
+- ✅ `language` and `framework` columns added
+- ✅ `approval_policy` enum
+- ✅ `prd`, `architecture`, `code_review` as JSONB
+- ⚠️ `prd` and `architecture` are stored as JSONB in the model but the orchestrator writes them as string artifacts to the filesystem — the model fields are never populated by the pipeline
+
+**`Artifact`** — `models/artifact.py`
+
+- ✅ Linked to `Project` via FK
+- ✅ `ArtifactType` enum: `code`, `documentation`, `review`, `devops`, `test`
+- ✅ `content` stored as Text
+- ⚠️ No `language` field on artifact — cannot query "all Python files for project X"
+
+**`ApprovalRequest`** — `models/approval.py`
+
+- ✅ `stage`, `status`, `content` (JSONB), `reviewer_comment`
+- ⚠️ Approval content is stored but never actually blocks the pipeline — the orchestrator does not check for pending approvals before proceeding to the next node
+
+**`APIKey`** — `models/api_key.py`
+
+- ✅ SHA-256 hashing, prefix storage
+- ✅ Expiry, is_active, last_used tracking
+- ✅ `rate_limit_per_minute` column — but the rate limiter uses the same 60/min for all keys regardless of this value
+
+**Missing models:**
+
+- No `AgentExecution` record — cannot track per-agent timing, token counts, or error history
+- No `ProjectEvent` log table — no audit trail of state transitions
+- No migration files — all schema changes require manual intervention
+
+---
+
+### 5.2 Critical Issues
+
+#### DB-BUG-1 · `approval_policy` value in `ProjectCreateRequest` is not validated
+
+The request accepts `approval_policy: Optional[str] = "standard"` but the model expects an `ApprovalPolicy` enum. An invalid string like `"aggressive"` will raise a cryptic DB error at commit time rather than a clean 422 response.
+
+---
+
+## 6. LLM Provider Layer
+
+### 6.1 `ollama_provider.py`
+
+**Status: ✅ Solid**
+
+- Class-level `asyncio.Semaphore(1)` for request serialization ✅
+- `num_ctx=4096`, `num_predict=2048` limits ✅
+- `asyncio.wait_for(timeout=120.0)` hard timeout ✅
+- Proactive connection check before generation ✅
+- `stream_generate()` async generator for streaming ✅
+- `json_mode=True` format parameter supported ✅
+- Token usage metadata returned ✅
+
+**Issues:**
+
+#### LLM-BUG-1 · `vllm_provider.py` raises `NotImplementedError` — listed as implemented in task plan
+
+```python
+async def generate(self, messages, ...):
+    raise NotImplementedError("vLLM provider generate not implemented")
+```
+
+Tasks.md marks this as ✅ but the actual implementation is a stub. Any configuration using `provider_name="vllm"` will crash at the first agent call.
+
+---
+
+#### LLM-ISSUE-1 · OpenAI and Anthropic providers raise `NotImplementedError` in factory
+
+Both are listed in the factory with `raise NotImplementedError(...)`. Any production fallback configuration relying on these will crash.
+
+#### LLM-ISSUE-2 · No LLM call logging to structured logger
+
+All token usage is returned in `LLMResponse.metadata` but nothing logs it persistently. There is no way to audit which model was used, how many tokens, or cost per project without adding instrumentation.
+
+#### LLM-ISSUE-3 · `json_mode=True` not universally available in Ollama
+
+Ollama's `format: "json"` instruction only works with models that support it. Qwen2.5-Coder-7B does support it, but there is no fallback if the model returns non-JSON despite the flag.
+
+---
+
+## 7. Agent Orchestration
+
+*(Covered in depth in the separate Agent Audit Report — summary here)*
+
+### 7.1 Status
+
+**Status: ⚠️ Partial — 4 critical bugs prevent E2E completion**
+
+| Bug | Description | Impact |
+|-----|-------------|--------|
+| State merge | All nodes except `_devops_node` return fresh `project_context` dicts, destroying prior context | CRITICAL — pipeline loses PRD before engineer runs |
+| Key mismatch | Reflexion reads `"comments"` but review returns `"feedback"` | CRITICAL — reflexion gets empty context always |
+| QualityGates import | Missing import in `reflexion.py` — `NameError` on instantiation | CRITICAL — reflexion agent never runs |
+| Reflexion output | Returns `fix_plan` text on fix path, not updated `code_repo` | CRITICAL — broken code never actually fixed |
+
+### 7.2 Improvements needed
+
+- `language` and `framework` must be added to `GraphState` and threaded through all 6 nodes
+- KG ingestion call hardcodes `"Python Project"` as name — must use actual PRD project name and pass language
+- `success_flag` can be lost due to state merge issue — needs explicit propagation
+- `_store_artifact` `makedirs` crashes on empty dirname for root-level files on Windows
+- `MAX_REFLEXION_RETRIES` boundary check off-by-one (`<` vs `>=`)
+- No approval gate between architect and engineer nodes (design spec requires user approval after architecture)
+- `_code_review_node` does not pass `language` to code review agent
+
+---
+
+## 8. Agent Implementations
+
+*(Covered in depth in the separate Agent Audit Report — summary of current status here)*
+
+### 8.1 Quick status summary
+
+| Agent | Key strength | Key weakness |
+|-------|-------------|--------------|
+| Product Manager | Domain anchoring, fallback templates | No JSON extraction, thin PRD schema, no clarifying questions |
+| Architect | Multi-pass validation, sanitization, fallback arch | Sanitizer breaks multi-language; arch not parsed to JSON before forwarding |
+| Engineer | 3-attempt recovery, GraphRAG, language coding standards map | Language hardcoded to python in `generate_code()`; last-mile rename loop breaks multi-language |
+| Code Review | Sandbox + LLM synthesis, robust JSON parse, structured issues | Review prompt hardcoded Python-only; sandbox findings not merged into issues list |
+| Reflexion | Full sandbox execution loop, KG impact analysis, dependency extraction | Missing QualityGates import; returns text on fix path not updated code |
+| DevOps | `code_repo` received | `code_repo` never used; bare except swallows all failures; Python-only hardcoded |
+
+---
+
+## 9. Knowledge Graph Subsystem
+
+### 9.1 What is fully implemented
+
+| Component | File | Status |
+|-----------|------|--------|
+| Neo4j async client | `graph/neo4j_client.py` | ✅ Full — connect, query, write, constraints, health check |
+| Python AST parser | `graph/code_parser.py` | ✅ Full — functions, classes, imports, content snippets, call graph |
+| Multi-language ingestion | `graph/ingestion.py` | ✅ Good — routes by language, two-pass (nodes then relationships) |
+| KG service — write methods | `services/knowledge_graph.py` | ✅ Full — store_function, store_class, store_module, store_component, store_pattern, store_error_fix, relationships |
+| KG service — query methods | `services/knowledge_graph.py` | ✅ Good — find_dependencies, analyze_impact, search_patterns, get_project_context |
+| Agent tools | `tools/knowledge_graph_tools.py` | ✅ Full — surgical context, file map, impact analysis, find callers, pattern search |
+| Neo4j constraints | `graph/neo4j_client.py` | ✅ Updated — includes Requirement, ArchitectureDecision, Pattern, ErrorFix node types |
+| Store pattern/error_fix | `services/knowledge_graph.py` | ✅ Implemented with non-blocking try/except |
+
+### 9.2 What is partially wired to agents
+
+| Integration Point | Status | Notes |
+|-------------------|--------|-------|
+| KG ingestion after code gen | ✅ Called in `_engineer_node` | But uses hardcoded `"Python Project"` name; language not passed |
+| Engineer surgical context | ✅ Used in `_generate_file_content` | Only on fix pass, not initial generation |
+| Reflexion impact analysis | ⚠️ Called | Uses `project_id="current"` — never returns real data |
+| Architect KG query | ❌ Not called | `kg_tools` instantiated but `design_architecture()` never uses it |
+| PM requirement storage | ❌ Not called | `kg_tools` not even instantiated in PM |
+| Cross-project pattern query | ❌ Not called | Methods exist but no agent calls them |
+
+### 9.3 Issues
+
+#### KG-BUG-1 · `get_surgical_context()` uses `project_id` parameter but Neo4j query uses `project_id` as a keyword arg
+
+```python
+# In knowledge_graph_tools.py:
+results = await self.kg_service.client.execute_query(
+    query,
+    project_id=project_id,   # keyword arg
+    names=dependency_names
+)
+```
+
+But `execute_query` signature is `execute_query(self, query, parameters=None)`. The keyword arguments are not being passed as the `parameters` dict — they are being ignored. The query runs without parameters and returns empty results every time.
 
 **Fix:**
 
 ```python
-review_comments = (
-    state["review_feedback"].get("feedback")
-    or state["review_feedback"].get("comments", "")
+results = await self.kg_service.client.execute_query(
+    query,
+    {"project_id": project_id, "names": dependency_names}
 )
 ```
 
 ---
 
-#### BUG-ORCH-3 · Reflexion loop returns fix_plan text, never updated code_repo
+#### KG-ISSUE-1 · JS and Java parsers are not yet implemented
 
-**Severity:** CRITICAL
+`ingestion.py` has the routing logic to call `_get_parser(language)` for JS/Java, but the actual parser classes (`JSCodeParser`, `JavaCodeParser`) are not created. JS and Java projects will either silently skip ingestion or fall back to the Python parser which will parse nothing useful.
 
-`_reflexion_node` extracts `fix_plan` (a text string) from the reflexion response and stores it in `review_feedback`. When the graph loops back to `_engineer_node`, the engineer receives this as `fix_instructions` — soft guidance text that a 7B model frequently ignores. The engineer then regenerates from scratch, discarding all previous fixes.
+#### KG-ISSUE-2 · No `Requirement` node is ever stored
 
-The reflexion agent's `execute_and_fix()` does return `"code_repo": current_repo` on success, but on the fix-plan path it returns only `"fix_plan"`. The orchestrator must retrieve and propagate the updated `code_repo`:
+`knowledge_graph.py` has the constraint for `Requirement` nodes but no `store_requirement()` method and no agent calls it. Requirements from the PM agent are never persisted to the KG.
+
+#### KG-ISSUE-3 · `store_error_fix()` and `store_pattern()` exist but are never called
+
+These are implemented with non-blocking try/except, but no agent calls them. Cross-project learning from successful fixes is planned but not connected.
+
+#### KG-ISSUE-4 · `get_project_file_map()` query uses wrong property name
+
+```cypher
+MATCH (project:Project {project_id: $project_id})
+```
+
+But project nodes are created with `id`, not `project_id`:
+
+```cypher
+CREATE (p:Project {id: $project_id, ...})
+```
+
+The file map query returns empty every time.
+
+---
+
+## 10. Sandbox & Code Execution
+
+### 10.1 Dual sandbox implementations
+
+There are two separate sandbox implementations:
+
+| File | Purpose | Status |
+|------|---------|--------|
+| `sandbox/environment.py` | `SandboxEnvironment` — used by `ReflexionEngine` and `QualityGates` | ✅ More complete |
+| `services/sandbox_service.py` | `SandboxService` — standalone Docker executor | ✅ Separate, simpler |
+
+These are not integrated — `sandbox_service.py` is never called by agents or the orchestrator. Only `sandbox/environment.py` is used.
+
+### 10.2 `sandbox/environment.py`
+
+**Status: ✅ Good foundation**
+
+- Creates Docker container per execution
+- Network isolation (`--network none`)
+- Memory and CPU limits
+- Timeout enforcement
+- Multi-file execution via temp directory
+- Cleanup in `finally` block
+
+### 10.3 Issues
+
+#### SANDBOX-BUG-1 · `sandbox/environment.py` is synchronous subprocess in an async context
 
 ```python
-# In _reflexion_node:
-response = await self.reflexion_agent.process_message(message)
-fixed_code_repo = response.payload.get("code_repo", state["project_context"].get("code_repo", {}))
-fix_plan = response.payload.get("fix_plan", "")
+process = subprocess.run(docker_args, ...)   # BLOCKING
+```
 
-return {
-    "messages": [...],
-    "project_context": {
-        **state["project_context"],
-        "code_repo": fixed_code_repo,   # propagate fixed code
-        "last_fix_plan": fix_plan
-    },
-    "review_feedback": {
-        **state["review_feedback"],
-        "reflexion_fix": fix_plan
-    },
-    "reflexion_count": state.get("reflexion_count", 0) + 1
-}
+`subprocess.run` is a blocking call. When called from an `async` function, it blocks the entire event loop for the duration of container execution (up to 30s). Other requests/tasks cannot run during this time.
+
+**Fix:** Use `asyncio.create_subprocess_exec` instead:
+
+```python
+process = await asyncio.create_subprocess_exec(
+    *docker_args,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE
+)
+stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
 ```
 
 ---
 
-#### BUG-ORCH-4 · `MAX_REFLEXION_RETRIES` boundary check is off-by-one
+#### SANDBOX-BUG-2 · Java sandbox not configured
 
-**Severity:** CRITICAL
+`sandbox_service.py` image map only has `python` and `javascript`/`typescript`. `sandbox/environment.py` also lacks Java container configuration. Java projects will use the Python image and fail.
 
-```python
-# CURRENT — allows 4 cycles, not 3:
-if state.get("reflexion_count", 0) < MAX_REFLEXION_RETRIES:
-    return "fix"
-```
+---
 
-`reflexion_count` is incremented inside `_reflexion_node`, so on the 3rd rejection the count is 2, and `2 < 3` routes to "fix" again (4th attempt). If the state merge bug causes count not to persist, this loops forever.
+#### SANDBOX-ISSUE-1 · Docker socket mount security risk
+
+Both sandbox implementations assume `/var/run/docker.sock` is mounted into the API container. This gives the API container full Docker host access, which is a container escape vector. For production, this should be replaced with a dedicated sidecar container or socket proxy (e.g., `docker-socket-proxy`).
+
+#### SANDBOX-ISSUE-2 · `services/sandbox_service.py` never called — dead code
+
+The `SandboxService` in `services/sandbox_service.py` is imported in `__init__.py` as `sandbox_service` but is never referenced by any agent, orchestrator node, or API endpoint. Only `sandbox/environment.py` (`SandboxEnvironment`) is used by the reflexion engine and quality gates.
+
+---
+
+## 11. Testing & Quality Gates
+
+### 11.1 `testing/test_generator.py`
+
+**Status: ✅ Good**
+
+- Multi-language framework selection: pytest, jest, vitest, junit
+- `get_test_filename()` follows framework conventions (PascalCase for JUnit, `.test.js` for Jest)
+- Framework-specific prompt instructions per language
+- Code extraction from markdown-fenced LLM responses
+- Coverage analysis estimation via LLM
+
+**Issues:**
+
+- Coverage analysis is estimated by LLM, not actually measured by running tests. Coverage numbers are fabricated.
+- `generate_unit_tests()` passes the entire source code into one LLM call — for files >1000 lines this will exceed the 4096 token context window.
+
+---
+
+### 11.2 `testing/quality_gates.py`
+
+**Status: ✅ Solid foundation**
+
+- Pylint, ESLint, mypy, tsc stubs, Bandit, npm audit stubs
+- Runs tools via Docker sandbox
+- JSON output parsing for all tool types
+- `QualityGateResult` dataclass with pass/fail and issue lists
+- `run_quality_gates()` calls linting + type checking + security in sequence
+
+**Issues:**
+
+- ESLint and npm audit are implemented but only produce empty lists — the actual tool invocations are present but the output parsing may not match the tool's actual JSON format
+- `_run_tsc()` returns `[]` — TypeScript type checking is a stub
+- `_run_rubocop()` returns `[]` — Ruby is a stub (expected)
+- Quality gate execution itself uses the same blocking subprocess issue as the sandbox
+
+---
+
+### 11.3 Project test coverage
+
+**Status: ❌ No tests exist**
+
+There are zero `tests/` directory files. The entire system has no automated tests — no unit tests, no integration tests, no property-based tests, no E2E tests. The only test file is `src/foundry/llm/test.py` which is a manual integration smoke test script, not a pytest suite.
+
+This is the single largest quality risk in the project.
+
+---
+
+## 12. Version Control Integration
+
+### 12.1 Dual Git implementations
+
+| File | Class | Status | Used by |
+|------|-------|--------|---------|
+| `services/git_service.py` | `GitService` | ✅ Basic | Imported in `orchestrator.py` but never called |
+| `vcs/git_manager.py` | `GitManager` | ✅ Comprehensive | Not called by any orchestrator node |
+
+**Neither Git implementation is called by the orchestrator pipeline.** Projects are generated and persisted to disk but no Git repository is initialized and no commit is made.
+
+### 12.2 `vcs/git_manager.py`
+
+**Status: ✅ Well implemented**
+
+- `initialize_repository()` — init, gitignore, gitattributes, initial commit
+- `create_commit()` — conventional commit format with scope and breaking change support
+- `create_feature_branch()` — `foundry/<agent>/<feature>` naming convention
+- `get_current_branch()`, `list_branches()`, `merge_branch()`
+- `create_tag()` — semantic versioning
+- `detect_conflicts()`, `resolve_conflicts()` — 3-way merge detection
+
+**Issues:**
+
+#### VCS-BUG-1 · `git_service.py` imported in orchestrator but `git_manager.py` is the complete implementation
+
+The orchestrator imports `git_service` but only uses it in a commented-out or non-functional path. `GitManager` (the complete implementation) is never imported by the orchestrator. The better implementation is completely disconnected.
+
+---
+
+#### VCS-ISSUE-1 · Git operations not integrated into the code generation flow
+
+The orchestrator's `_engineer_node` should call `git_manager.initialize_repository()` on first generation and `git_manager.create_commit()` after each successful code generation. This is currently never done.
+
+---
+
+## 13. Middleware & Security
+
+### 13.1 Authentication (`middleware/auth.py`)
+
+**Status: ✅ Good**
+
+- `APIKeyHeader` for `X-API-Key` header
+- SHA-256 key hashing — plaintext never stored
+- Master key support via `settings.foundry_api_key`
+- Expiry check, `is_active` flag, last-used timestamp update
+- `get_api_key` (optional) and `require_api_key` (enforced) dependencies
+
+**Issues:**
+
+- Master key returns a mock `APIKey` object with `id=None` — endpoints that call `api_key.id` will crash with `AttributeError`
+- `deactivate_api_key` endpoint has no `require_api_key` dependency — anyone can deactivate a key
+- No IP whitelisting (column exists in model but never checked)
+
+---
+
+### 13.2 Rate Limiting (`middleware/rate_limit.py`)
+
+**Status: ✅ Good**
+
+- Redis sliding window using sorted sets
+- Per-API-key and per-IP tracking
+- Rate limit headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+- Health and docs paths bypassed
+- Graceful Redis failure (allows all requests)
+
+**Issues:**
+
+- Rate limit is 60/min globally, but `APIKey` model has `rate_limit_per_minute` per key — the middleware never reads the per-key value
+
+---
+
+### 13.3 Security Headers (`middleware/security.py`)
+
+**Status: ✅ Good**
+
+- HSTS, CSP, X-Frame-Options, X-Content-Type-Options, XSS-Protection, Referrer-Policy, Permissions-Policy
+
+**Issues:**
+
+- CSP includes `'unsafe-inline'` and `'unsafe-eval'` for scripts — these reduce CSP effectiveness. Acceptable for development but should be tightened before production.
+- CORS allows `*` in `main.py` — wildcard CORS overrides the CSP intent for cross-origin requests
+
+---
+
+## 14. Services Layer
+
+### 14.1 `services/agent_control.py`
+
+**Status: ✅ Good**
+
+- Pause, resume, cancel with Redis flags
+- Checkpoint save/get/delete with 7-day TTL
+- Control status check
+
+**Issues:**
+
+- `pause_execution()` sets a Redis flag, but the orchestrator never checks this flag during execution. Pausing only works at the API boundary — an in-progress agent node will not stop.
+- Checkpoints store `agent_state: Dict` but there is no mechanism to restore LangGraph execution from a checkpoint (LangGraph requires `MemorySaver` or custom checkpointing configured at graph compile time).
+- `resume_execution()` only deletes the Redis key. The API endpoint then sets `project.status = ProjectStatus.created`, which loses all progress.
+
+---
+
+### 14.2 `services/project_service.py`
+
+**Status: ✅ Good**
+
+- Full CRUD with lifecycle management
+- `delete_project()` — multi-step: CDK destroy stub, KG cleanup stub, filesystem delete, DB record delete
+- `list_projects()` with status filter and metadata
+- Resource usage and cost estimation stubs
+
+**Issues:**
+
+- `_destroy_cloud_resources()` is a stub — CDK integration is not implemented
+- `_delete_knowledge_graph_nodes()` is a stub — KG cleanup does not happen on project deletion
+- `_get_resource_usage()` and `_estimate_monthly_cost()` return hardcoded `0` and `0.0`
+
+---
+
+### 14.3 `services/knowledge_graph.py`
+
+**Status: ✅ Well implemented** — covered in detail in Section 9.
+
+---
+
+## 15. Utilities & Language Support
+
+### 15.1 `utils/language_config.py`
+
+**Status: ✅ Complete**
+
+- `LanguageConfig` dataclass with all language metadata
+- 4 languages: Python, JavaScript, TypeScript, Java
+- Fields: extensions, entry_point, package_file, test_pattern, linters, test_framework, base_image, coding_standard, web_frameworks, forbidden_patterns
+- `get_language_config(language)` with Python fallback
+
+**Issues:**
+
+- `forbidden_patterns` field exists but is never read by any agent or guard — it was intended to be used for wrong-language detection but `language_guards.py` uses its own separate signature list
+
+---
+
+### 15.2 `utils/language_guards.py`
+
+**Status: ✅ Good**
+
+- Language signature patterns for Python, JavaScript, TypeScript, Java
+- `detect_language_mismatch(code, expected_language)` — returns True if code appears to be in a different language
+- `recover_prompt(filename, dirty_code, target_language, architecture)` — builds corrective LLM prompt
+- Scoring mechanism: counts signature hits per language, mismatch when a different language scores higher
+
+**Issues:**
+
+- `recover_prompt()` calls `get_language_config(language)` and then accesses `config["name"]` and `config["extension"]` as dict keys, but `get_language_config()` returns a `LanguageConfig` dataclass, not a dict. This will raise `TypeError` when the recovery prompt is built.
 
 **Fix:**
 
 ```python
-if state.get("reflexion_count", 0) >= MAX_REFLEXION_RETRIES:
-    return "fail"
-return "fix"
+# Wrong:
+config = get_language_config(target_language)
+lang_name = config["name"]
+
+# Correct:
+config = get_language_config(target_language)
+lang_name = config.name
 ```
 
 ---
 
-### 1.3 High Issues
+### 15.3 `utils/__init__.py`
 
-#### HIGH-ORCH-1 · `_store_artifact` — `makedirs` on empty dirname crashes on some OS
+**Status: ✅ Clean** — exports `get_language_config`, `detect_language_mismatch`, `recover_prompt`.
 
-When `name = "main.py"` (no subdirectory), `os.path.dirname(file_path)` returns an empty string. `os.makedirs("")` raises `FileNotFoundError` on Windows.
+---
 
-```python
-# Fix:
-dir_part = os.path.dirname(file_path)
-if dir_part:
-    os.makedirs(dir_part, exist_ok=True)
+## 16. Infrastructure & DevOps Configuration
+
+### 16.1 `docker-compose.yml`
+
+**Status: ✅ Core services present**
+
+Services confirmed: `api`, `celery-worker`, `postgres`, `redis`, `neo4j`, `ollama`
+
+**Issues:**
+
+#### INFRA-BUG-1 · `generated_projects` volume not mounted to host
+
+The generated project files are written to `/app/generated_projects` inside the container, but this directory is not mounted to the host filesystem. When the E2E test looks for generated files, they are invisible.
+
+**Fix (already documented in fixes document):**
+
+```yaml
+volumes:
+  - ./generated_projects:/app/generated_projects
+```
+
+Must be added to both `api` and `celery-worker` services.
+
+---
+
+#### INFRA-ISSUE-1 · Ollama model not pulled in docker-compose startup
+
+The `ollama` service starts but does not pull `qwen2.5-coder:7b` automatically. The API will fail on first LLM call with a 404 "model not found" error until the model is manually pulled.
+
+Add to docker-compose:
+
+```yaml
+ollama:
+  entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull qwen2.5-coder:7b && wait"]
+```
+
+#### INFRA-ISSUE-2 · No Alembic migration configuration
+
+`alembic.ini` exists but no `alembic/versions/` migration files. The database schema is created via `Base.metadata.create_all()` which is not suitable for production schema management.
+
+#### INFRA-ISSUE-3 · No health check for dependent services
+
+`api` service starts without waiting for postgres, redis, and neo4j to be ready. Race conditions on first startup can cause connection errors.
+
+Add `depends_on` with health checks:
+
+```yaml
+api:
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
 ```
 
 ---
 
-#### HIGH-ORCH-2 · `_store_artifact` blocks `.js`, `.ts`, `.java` extensions — breaks multi-language support
+## 17. What Is Missing (Not Yet Built)
 
-```python
-forbidden_exts = ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs', '.php', '.html', '.css']
-```
+### 17.1 VS Code Extension — 0% complete
 
-This hard blocks every JavaScript, TypeScript, and Java project. Since multi-language support is now a requirement, this gate must be replaced with a language-aware check that only blocks wrong-language extensions for the current project's target language.
+The primary user-facing client is not started. No TypeScript extension code exists. Per requirements:
 
----
+- WebSocket connection to backend
+- Phantom File Tree rendering
+- Real-time token streaming into editor
+- Approve/reject UI
+- Agent dashboard panel
 
-#### HIGH-ORCH-3 · `JS_PATTERNS` regex still present as class attribute — blocks JS projects
+### 17.2 AWS CDK Integration — 0% complete
 
-The regex at the top of `AgentOrchestrator` is used in `_store_artifact` to block JS content in `.py` files. This is correct for Python-only projects but will incorrectly block valid JS/TS code. Must be language-parameterized.
+Requirements 7.1-7.6 mandate:
 
----
+- CDK infrastructure generation (TypeScript/Python)
+- `cdk synth` validation before deployment
+- `cdk bootstrap` detection
+- `cdk deploy --require-approval never`
+- CfnOutput capture (Load Balancer URLs, S3 buckets)
+- `cdk destroy --force` on deletion
 
-#### HIGH-ORCH-4 · `_code_review_node` does not pass `language` to review agent
+None of this exists. DevOps agent generates only a Dockerfile and docker-compose.yml.
 
-```python
-payload = {
-    "code_repo": code_repo,
-    "project_id": state["project_id"]
-    # language missing
-}
-```
+### 17.3 Alembic migrations — 0% complete
 
-The code review agent defaults to `"python"` and its system prompt explicitly says "Python-only auditor." JS and Java projects will always be rejected.
+Schema changes are applied via `Base.metadata.create_all()`. Production deployments require proper Alembic migration history.
 
----
+### 17.4 OpenAI and Anthropic providers — stubs only
 
-#### HIGH-ORCH-5 · `success_flag` can be lost due to state merge issue
+Both raise `NotImplementedError`. Production fallback chains are not functional.
 
-`_devops_node` returns `"success_flag": True`, but if final state accumulation via `{**final_state, **value}` in the `run()` loop drops it due to ordering, the project is permanently marked `failed` even on successful generation. The `run()` loop should explicitly track `success_flag` separately.
+### 17.5 LangGraph human-in-the-loop approval gate
 
----
+The design requires a pause between architect and engineer for user approval of the architecture. The LangGraph graph goes directly from `architect → engineer` with no approval checkpoint. `ApprovalRequest` model exists but is never created by the orchestrator.
 
-### 1.4 Medium Issues
+### 17.6 Real pause/resume for LangGraph graph
 
-#### MED-ORCH-1 · KG ingestion hardcodes `"Python Project"` as project name
+Current pause sets a Redis flag but the graph never checks it. True pause/resume requires LangGraph `MemorySaver` checkpointing configured at compile time, and the `run()` method must support resuming from a thread ID.
 
-```python
-await ingestion_pipeline.ingest_project(
-    project_id=state["project_id"],
-    project_name=f"Python Project {state['project_id'][:8]}",  # hardcoded
-    project_path=project_path
-)
-```
+### 17.7 Automated test suite for the project itself
 
-Must use the actual project name from PRD and pass `language` to route to the correct parser.
+Zero pytest tests for any component. The entire codebase is tested manually only.
 
----
+### 17.8 JS/Java parsers for Knowledge Graph
 
-#### MED-ORCH-2 · `_reflexion_node` does not pass `language` or structured `issues` list to reflexion agent
+`js_parser.py` and `java_parser.py` are referenced in ingestion routing but do not exist as files.
 
-The reflexion payload only sends `feedback` (a string). The structured `issues` list from code review (with file, line, severity, description per issue) is never forwarded. Reflexion cannot make targeted per-file fixes without it.
+### 17.9 Cost estimation
 
----
+`project_service.py` has `_estimate_monthly_cost()` that returns `0.0`. No integration with AWS pricing API or local estimation.
 
-#### MED-ORCH-3 · `GraphState` has no `language` or `framework` field
+### 17.10 Monitoring dashboard
 
-All language-specific routing must be done after reading it from `project_context` (unreliable) rather than from a dedicated state field. Adding `language: str` and `framework: str` to `GraphState` and threading them from `run()` through all nodes is required for multi-language support.
+No Prometheus metrics, no Grafana dashboard, no structured log shipping.
 
----
+### 17.11 `store_requirement()` method in KG service
 
-## 2. Product Manager Agent
-
-**File:** `src/foundry/agents/product_manager.py`  
-**Class:** `ProductManagerAgent`
-
-### 2.1 What Is Implemented
-
-- Natural language requirements → PRD JSON via LLM
-- Domain grounding anchor injected into system prompt (Fix L)
-- Keyword validation heuristic with retry on domain drift
-- Hard fallback template if both attempts drift
-- `pm_debug.json` written for diagnostics
-- `requirements` key persisted in response payload (Fix L)
-
-### 2.2 Critical Bugs
-
-#### BUG-PM-1 · No robust JSON extraction — silently passes raw strings downstream
-
-The agent calls `json.dumps` / `json.loads` on `content` but has no extraction step for fenced responses. When the LLM outputs:
-
-```
-Here is your PRD:
-```json
-{"project_name": "..."}
-```
-
-```
-
-The content variable is the full string including the sentence and fences. `json.loads` fails, the bare `except: pass` swallows the error, and `content` (the raw malformed string) is returned as `prd` to the orchestrator. The architect then receives this as its input PRD.
-
-**Fix — add `_extract_json()` before any downstream use:**
-
-```python
-def _extract_json(self, content: str) -> dict:
-    # Strip fences
-    content = re.sub(r'^```(?:json)?\n?', '', content.strip(), flags=re.MULTILINE)
-    content = re.sub(r'\n?```$', '', content.strip(), flags=re.MULTILINE)
-    try:
-        return json.loads(content.strip())
-    except json.JSONDecodeError:
-        match = re.search(r'\{.*\}', content, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        raise ValueError(f"No valid JSON in response: {content[:200]}")
-```
+The `Requirement` node type has a constraint in Neo4j but there is no service method to create them. PM agent cannot store requirements in KG.
 
 ---
 
-### 2.3 High Issues
+## 18. Cross-Cutting Issues
 
-#### HIGH-PM-1 · PRD schema is critically thin — missing NFRs and acceptance criteria
+### 18.1 `print()` statements throughout agents
 
-Required by Req 2.3/2.4 but absent. Current schema:
+All agents use `print(f"DEBUG: ...")` and `print(f"CRITICAL: ...")` instead of `logger.info/warning/error`. This pollutes stdout, cannot be filtered by log level, and writes sensitive data to container logs.
 
-```json
-{"project_name", "high_level_description", "core_features", "user_stories", "technical_constraints"}
-```
+**Fix:** Replace all `print()` calls in `agents/` with `logger.info()`, `logger.warning()`, `logger.critical()`.
 
-Missing: `functional_requirements`, `non_functional_requirements`, `acceptance_criteria`, `out_of_scope`. The architect uses only what's in the PRD — a thin PRD produces a thin, inconsistent architecture.
+### 18.2 Language threading gap
 
----
+`language` and `framework` exist in the `Project` model and `ProjectCreateRequest` could accept them, but they are never:
 
-#### HIGH-PM-2 · Keyword heuristic logic is inverted for common words
+1. Passed to the orchestrator `run()` method
+2. Added to `GraphState`
+3. Forwarded in any agent message payload
 
-`key_terms` extracts all words > 3 chars from the requirements. For a prompt like `"build a todo list app"`, the terms include `["build", "list"]` — generic words that appear in almost any PRD. `match_count` will always be > 0, so the validation never triggers even when the PRD is completely wrong. Conversely, for `"fft"` (3 chars), `key_terms` is empty and the check is bypassed entirely.
+Every project, regardless of what was requested, executes as a Python project.
 
----
+### 18.3 No structured event logging
 
-#### HIGH-PM-3 · Clarifying questions (Req 2.2) entirely unimplemented
+The system has no `ProjectEvent` table or event bus. When debugging a failed project, there is no way to see the sequence: "PM generated PRD at 10:01, Architect started at 10:02, Engineer failed at 10:05 with error X". Only the final `project.status` is persisted.
 
-The design spec requires generating clarifying questions for ambiguous inputs. The method doesn't exist. For very short prompts (< 15 words, < 3 distinct nouns), the agent should ask 2-3 targeted questions before generating the PRD. Without this, vague inputs produce garbage PRDs that cascade into garbage architecture.
+### 18.4 `approve/reject` endpoints don't actually gate the pipeline
 
----
+The approval endpoints exist and work correctly, but the pipeline never checks for pending approvals. The graph flows continuously from node to node. The approval model is orphaned infrastructure with no consumer.
 
-### 2.4 Medium Issues
+### 18.5 Redis connection failure handling
 
-#### MED-PM-1 · `pm_debug.json` written to `os.getcwd()` unconditionally in production
-
-Writes sensitive user requirements to the filesystem on every single call. Must be gated:
-
-```python
-if settings.debug:
-    # write debug file
-```
-
-#### MED-PM-2 · `process_message` ignores `project_id` — cannot store requirements in KG
-
-`process_message` accepts only the `prompt` payload key. `project_id` is available in the message payload but not extracted or forwarded to `analyze_requirements`. KG storage of requirements (for cross-project learning) requires this.
-
-#### MED-PM-3 · Fallback PRD template `technical_constraints` hardcodes Python
-
-```python
-"technical_constraints": ["Python 3.11+", "Scalable architecture"]
-```
-
-This will inject Python into a Java or JS project's requirements.
+If Redis goes down during a project run, the rate limiter silently allows all requests (correct), but `agent_control_service` operations will throw unhandled exceptions because there is no try/except around Redis operations in `AgentControlService`.
 
 ---
 
-## 3. Architect Agent
+## 19. Prioritised Improvements & Fix Checklist
 
-**File:** `src/foundry/agents/architect.py`  
-**Class:** `ArchitectAgent`
+### P0 — Must fix before any E2E test passes
 
-### 3.1 What Is Implemented
+- [ ] **INFRA-BUG-1** — Add `generated_projects` volume mount to docker-compose for `api` and `celery-worker`
+- [ ] **ORCH-BUG-1** — Fix state merge in `_pm_node`, `_architect_node`, `_engineer_node`, `_code_review_node`, `_reflexion_node` (use `{**state["project_context"], ...}`)
+- [ ] **ORCH-BUG-2** — Fix `"comments"` → `"feedback"` key in `_reflexion_node`
+- [ ] **REFX-BUG-1** — Add `from foundry.testing.quality_gates import QualityGates` to `reflexion.py`
+- [ ] **ORCH-BUG-3** — Fix reflexion node to propagate `code_repo` from response back into `project_context`
+- [ ] **ORCH-BUG-4** — Fix `reflexion_count >= MAX_REFLEXION_RETRIES` boundary (`<` vs `>=`)
+- [ ] **KG-BUG-1** — Fix `execute_query()` parameter passing in `get_surgical_context()` (use positional dict, not keyword args)
+- [ ] **KG-ISSUE-4** — Fix `get_project_file_map()` Cypher to use `{id: $project_id}` not `{project_id: $project_id}`
 
-- Multi-pass validation loop (up to 2 LLM attempts) with `_is_non_python_stack()` check
-- `_self_correct_architecture()` via in-conversation correction message
-- `_sanitize_architecture_for_engineer()` — replaces JS/Node terms with Python equivalents and renames `.js`/`.ts` extensions to `.py`
-- `_python_fallback_architecture()` — hard-coded Python fallback template if both passes fail
-- Expanded forbidden keyword list in `_is_non_python_stack()` covering Vue, Angular, webpack, etc.
-- KG tools instantiated (but not called during architecture design)
+### P1 — Required for multi-language support and reliable operation
 
-### 3.2 Critical Bugs
+- [ ] **API-BUG-3** — Add `language` and `framework` to `ProjectCreateRequest`
+- [ ] **API-BUG-4** — Pass `language` and `framework` from request → project model → `_run_project_background()` → `orchestrator.run()`
+- [ ] **ORCH** — Add `language: str` and `framework: str` to `GraphState`; thread through all node payloads
+- [ ] **ENG-BUG-1** — Replace `language = "python"` hardcode with `message.payload.get("language", "python")`
+- [ ] **UTILS-BUG-1** — Fix `recover_prompt()` to use `config.name` and `config.extensions[0]` not dict key access
+- [ ] **ARCH-BUG-1** — Make `_sanitize_architecture_for_engineer()` conditional on Python-only projects; skip for JS/Java
+- [ ] **REV-BUG-2** — Replace `"Python-only auditor"` system prompt with language-parameterized version
+- [ ] **DEV-BUG-1** — Use `code_repo` in `devops.py` to extract deps and entry point; use `get_language_config(language).base_image`
+- [ ] **SANDBOX-BUG-1** — Replace blocking `subprocess.run` with `asyncio.create_subprocess_exec` in sandbox
+- [ ] **INFRA-ISSUE-3** — Add `depends_on` with health checks to docker-compose
 
-#### BUG-ARCH-1 · `_sanitize_architecture_for_engineer()` is destructive for multi-language projects
+### P2 — Quality, reliability, and completeness
 
-This method forcibly replaces `"React"` → `"Python/Jinja2"`, `"TypeScript"` → `"Python"`, renames all `.js`/`.ts` extensions to `.py`, and replaces `"MongoDB"` → `"PostgreSQL"`. For a JavaScript or Java project, this will corrupt the entire architecture before the engineer sees it. This sanitizer must be removed or made conditional on the target language.
+- [ ] **KG-ISSUE-1** — Create `graph/js_parser.py` and `graph/java_parser.py`
+- [ ] **KG-ISSUE-2** — Add `store_requirement()` to `knowledge_graph.py`; call from PM agent after PRD generation
+- [ ] **KG-ISSUE-3** — Call `store_error_fix()` from reflexion agent on successful fix; call `store_pattern()` from architect
+- [ ] **VCS-BUG-1** — Integrate `GitManager` into `_engineer_node`: init repo on first generation, commit on each completion
+- [ ] **API-BUG-1** — Fix resume endpoint to restore correct project status from checkpoint
+- [ ] **API-BUG-2** — Connect WebSocket broadcasts to agent execution events via Redis pub/sub
+- [ ] **AUTH-BUG-1** — Fix master key mock object to return a real `APIKey` with valid `id`
+- [ ] **AUTH-BUG-2** — Add `require_api_key` to `deactivate_api_key` endpoint
+- [ ] **RATE** — Read `api_key.rate_limit_per_minute` in rate limiter instead of hardcoded 60
+- [ ] **INFRA-ISSUE-1** — Auto-pull Ollama model in docker-compose startup
+- [ ] **INFRA-ISSUE-2** — Add Alembic migration files
+- [ ] **DB-BUG-1** — Add `ApprovalPolicy` validation to `ProjectCreateRequest`
+- [ ] **CROSS-1** — Replace all `print()` in agents with structured `logger` calls
+- [ ] **LLM-BUG-1** — Implement vLLM provider (or mark clearly as not available)
+- [ ] **LLM-ISSUE-1** — Implement OpenAI provider (or provide clear error messages)
+- [ ] Add `language` field to `Artifact` model — enables per-language artifact queries
+- [ ] Add `AgentExecution` model — track per-agent timing, token usage, success/fail
+- [ ] Add approval gate in LangGraph graph between `architect` and `engineer` nodes
 
----
+### P3 — Complete the system
 
-#### BUG-ARCH-2 · Architecture validated twice but never parsed/normalized as JSON
-
-The system prompt says "Return the result as a JSON object" but `architecture_content = response.content` stores the raw string, which may be:
-
-- Valid JSON `{"projectName": ...}`  
-- Markdown-fenced JSON (` ```json\n{...}\n``` `)  
-- Plain prose description
-
-This raw string is passed directly to the engineer. If it contains prose or fences, the engineer's LLM receives confusing mixed input. The architect must parse, validate, and re-serialize the JSON before forwarding.
-
----
-
-### 3.3 High Issues
-
-#### HIGH-ARCH-1 · `_is_non_python_stack()` must become `_is_wrong_stack(content, language)`
-
-Currently hardcoded to check for Python violations. For JS projects it will always trigger and force Python. Needs a `language` parameter to check for the appropriate forbidden patterns.
-
-#### HIGH-ARCH-2 · ADR prompt example in `document_architectural_decisions()` uses React/TypeScript
-
-```python
-"title": "Selection of React for Frontend"
-"decision": "Use React with TypeScript for frontend development"
-```
-
-This few-shot example teaches the LLM to recommend React/TypeScript in any ADR regardless of the actual stack. Replace with a language-neutral or Python/FastAPI example.
-
-#### HIGH-ARCH-3 · `organize_file_structure()` has no language constraint
-
-Method prompt says "Generate a comprehensive file structure" with no language restriction. For a Python project with a frontend-flavored PRD, it may output `src/components/App.tsx`, `package.json`, etc.
-
----
-
-### 3.4 Medium Issues
-
-#### MED-ARCH-1 · `design_architecture()` does not accept or use `project_id`
-
-Cannot store architecture decisions in KG. `kg_tools` is instantiated but `design_architecture` never calls it.
-
-#### MED-ARCH-2 · `_python_fallback_architecture()` hardcodes `"SQLite"` and `"Python 3.11"`
-
-For a Java or JS project this fallback will produce an entirely wrong architecture. Must be parameterized by language.
+- [ ] **TESTS** — Write pytest suite: unit tests for all agents, services, utils; integration tests for API; E2E tests for full pipeline
+- [ ] **VS Code Extension** — Build TypeScript extension (WebSocket, phantom tree, streaming, dashboard)
+- [ ] **AWS CDK** — Implement DevOps agent CDK generation, `cdk synth`, `cdk deploy`, health checks
+- [ ] **Pause/Resume** — Implement LangGraph `MemorySaver` checkpointing for true graph pause/resume
+- [ ] **Monitoring** — Add Prometheus metrics, structured JSON logging with correlation IDs
+- [ ] **Approval gate** — Wire `ApprovalRequest` creation and checking into orchestrator flow
+- [ ] **Cost estimation** — Implement `_estimate_monthly_cost()` with actual logic
+- [ ] **OpenAI/Anthropic providers** — Full implementation for production fallback
 
 ---
 
-## 4. Engineer Agent
-
-**File:** `src/foundry/agents/engineer.py`  
-**Class:** `EngineerAgent`
-
-### 4.1 What Is Implemented
-
-- `JS_PATTERNS` compiled regex for leakage detection
-- 3-attempt recovery loop with auto-stub fallback on persistent failure
-- GraphRAG via `get_surgical_context()` — used when KG has data; falls back to raw previous-file context
-- Incremental repair mode — uses `existing_version` as baseline when `fix_instructions` present
-- Last-mile filename extension normalization (forces `.py` on non-Python extensions)
-- Quality gates run after generation
-- Test generation run after quality gates
-- KG context retrieval during fix mode via `get_component_context()`
-
-### 4.2 Critical Bugs
-
-#### BUG-ENG-1 · `_detect_language()` always returns `"python"` — blocks all multi-language projects
-
-```python
-def _detect_language(self, architecture_content: str) -> str:
-    """Hardened language detection: Always returns 'python'."""
-    return "python"
-```
-
-And in `generate_code()`:
-
-```python
-language = "python"  # Force Python as per system constraints
-```
-
-This is the root cause of all JavaScript, TypeScript, and Java projects failing to generate correct code. The language must come from the LangGraph state (via message payload from orchestrator).
-
----
-
-#### BUG-ENG-2 · `_request_code_improvements()` has no language constraint
-
-```python
-system_prompt = """You are a Python Quality Expert. 
-...
-ABSOLUTE REQUIREMENT: You MUST implement improvements using ONLY Python 3.11+.
-PROHIBITED: Do NOT use any JavaScript, Node, or web-framework syntax."""
-```
-
-Quality improvements for JS/TS/Java files will produce Python-contaminated code.
-
----
-
-#### BUG-ENG-3 · Last-mile filename renaming loop corrupts multi-language projects
-
-```python
-if any(f_clean.lower().endswith(ext) for ext in ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs']):
-    new_name = os.path.splitext(f_clean)[0] + ".py"
-    final_repo[new_name] = content
-```
-
-Renames `index.js` → `index.py`, `Main.java` → `Main.py` etc. for every project regardless of target language.
-
----
-
-### 4.3 High Issues
-
-#### HIGH-ENG-1 · KG context only retrieved during fix mode, not initial generation
-
-`kg_context` from `get_component_context()` is only populated when `fix_instructions` is present. On the first pass (initial generation), the KG is empty anyway — but on repeat generations or second projects, existing KG data is ignored.
-
-The `get_project_summary_for_generation()` method should be called on every generation pass, not just during repair.
-
-#### HIGH-ENG-2 · `_plan_file_structure()` hardcodes `.py` extensions and `"FastAPI"` override
-
-```python
-system_prompt = f"""...
-ABSOLUTE REQUIREMENT: You MUST use ONLY .py extensions for code files.
-PROHIBITED: No .js, .ts, .jsx, .html, .css, .java, .go, .rs.
-If the architecture suggests a 'Frontend' with 'React', use 'FastAPI' with 'Jinja2' patterns.
-"""
-```
-
-Must use `get_config(language).extensions` and `get_config(language).web_frameworks`.
-
-#### HIGH-ENG-3 · File generation capped at 3 files then immediately generates tests — LLM call explosion
-
-`files_to_generate = files_to_generate[:3]` limits code files. Then `generate_tests()` adds test files for each. Each file requires 2-4 LLM calls (generation + optional quality check + possible recovery). On a 7B model over Ollama with no semaphore, this is 8-24 sequential LLM calls per engineer invocation, reliably causing timeouts.
-
-#### HIGH-ENG-4 · `CODING_STANDARDS` dict only has `"python"` key
-
-```python
-CODING_STANDARDS = {"python": "PEP 8 (Strict Enforcement)"}
-```
-
-For any other language, `coding_standard` falls back to `"industry best practices"` — a useless prompt directive. Must be populated for all target languages.
-
----
-
-### 4.4 Medium Issues
-
-#### MED-ENG-1 · `_extract_imports()` has JS/TS branches despite Python-only system
-
-The function has a full `elif filename.endswith(('.js', '.ts', '.jsx', '.tsx')):` branch. This dead code will silently process JS files if they slip past the naming guard and is actively misleading given the Python-only constraint that was previously applied.
-
-#### MED-ENG-2 · `write_code_to_disk()` cleanup is weaker than `_clean_code()`
-
-`write_code_to_disk` only strips the first and last line if the content starts with a backtick. `_clean_code()` uses regex and is much more robust. These two should be unified.
-
-#### MED-ENG-3 · `_request_code_generation()` is defined but never called
-
-This internal method exists and takes `filename`, `architecture`, `language`, `coding_standard` etc. as separate parameters. `_generate_file_content()` constructs its own prompt inline instead of calling this method. The abstraction is never used.
-
----
-
-## 5. Code Review Agent
-
-**File:** `src/foundry/agents/code_review.py`  
-**Class:** `CodeReviewAgent`
-
-### 5.1 What Is Implemented
-
-- QualityGates integration: runs Bandit, Pylint, mypy in Docker sandbox before LLM review
-- Sandbox results injected into LLM prompt as `dynamic_context`
-- Robust JSON extraction: finds outermost `{}` and strips markdown before parsing
-- `"approved"` bridge field added to payload for LangGraph routing
-- Stores `code_review.json` artifact
-- Returns structured `issues` list with severity, file, line, description, suggestion
-
-### 5.2 Critical Bugs
-
-#### BUG-REV-1 · `analyze_code()` returns review payload with key `"feedback"` but orchestrator reads `"comments"`
-
-```python
-# Code review agent returns:
-payload = {"status": "APPROVED", "feedback": "...", "issues": [...]}
-
-# Orchestrator _reflexion_node reads:
-review_comments = state["review_feedback"].get("comments", "")  # always empty string
-```
-
-This is the key mismatch that prevents reflexion from ever receiving useful context. (Fix is in orchestrator `_reflexion_node`, documented in BUG-ORCH-2.)
-
----
-
-#### BUG-REV-2 · System prompt hardcodes `"Python-only auditor"` — rejects all JS/Java projects
-
-```python
-system_prompt = """...
-ABSOLUTE PYTHON REQUIREMENT: You are a Python-only auditor.
-1. If the code contains ANY JavaScript, React, Node.js, or non-Python tech, you MUST REJECT it immediately.
-"""
-```
-
-Every JavaScript and Java project will be auto-rejected with `status: "REJECTED"` regardless of code quality. Must be language-parameterized.
-
----
-
-### 5.3 High Issues
-
-#### HIGH-REV-1 · `gate_results` security and lint issues are not added to the structured `issues` list
-
-Sandbox results are injected as text into the LLM prompt (`dynamic_context`), but the structured `gate_results.security_issues` and `gate_results.lint_issues` objects are never merged into `review_data["issues"]`. Downstream consumers (reflexion agent, VS Code annotations) can only see sandbox findings if they re-parse free text — they cannot act on them programmatically.
-
-```python
-# Add after gate_results block:
-if gate_results:
-    for sec_issue in gate_results.security_issues:
-        review_data.setdefault("issues", []).append({
-            "severity": sec_issue.severity.value.upper(),
-            "file": sec_issue.file,
-            "line": sec_issue.line,
-            "description": sec_issue.description,
-            "suggestion": sec_issue.recommendation,
-            "source": "bandit"
-        })
-```
-
-#### HIGH-REV-2 · Fallback on JSON parse failure creates misleading error message
-
-```python
-review_data = {
-    "status": "REJECTED",
-    "feedback": "AUTO-REJECT: JSON parsing failed. Please return valid JSON.",
-    "issues": ["JSON syntax error"]
-}
-```
-
-`"issues"` is a list of strings, not dicts. Downstream code expecting `issue["severity"]`, `issue["file"]` etc. will crash with `TypeError`. Use consistent structure.
-
-#### HIGH-REV-3 · `issues` list from review not passed to reflexion by orchestrator
-
-Even when review produces a valid structured issues list, the orchestrator's `_reflexion_node` only passes a `"feedback"` string to reflexion. The per-file, per-line issue details are discarded. Reflexion cannot make surgical fixes without knowing which file has which problem on which line.
-
----
-
-### 5.4 Medium Issues
-
-#### MED-REV-1 · `recipient` in returned `AgentMessage` is `AgentType.DEVOPS`
-
-```python
-return AgentMessage(
-    sender=self.agent_type,
-    recipient=AgentType.DEVOPS,  # wrong — review goes to orchestrator
-    message_type=MessageType.TASK,
-    payload=review_data
-)
-```
-
-The orchestrator ignores this field, but it's semantically wrong and will cause bugs in any future message-routing system.
-
-#### MED-REV-2 · QualityGates only runs Python tools (Bandit, Pylint, mypy)
-
-For JS projects, `_run_eslint()` and `_run_npm_audit()` are stubs returning `[]`. JS projects get no sandbox validation.
-
----
-
-## 6. Reflexion Engine
-
-**File:** `src/foundry/agents/reflexion.py`  
-**Class:** `ReflexionEngine` (aliased as `ReflexionAgent`)
-
-### 6.1 What Is Implemented
-
-- Full `execute_and_fix()` loop: execute in sandbox → analyze errors → generate fix plan → retry up to `MAX_RETRY_ATTEMPTS = 5`
-- Dependency extraction from `requirements.txt` in the repo
-- KG impact analysis queried during fix generation (`analyze_change_impact()`)
-- Legacy `reflect_on_feedback()` kept for backward compatibility
-- `should_escalate()` with memory error detection
-- Rule-based `FixGenerator` tried first before falling back to LLM
-- On success: returns `"code_repo": current_repo` in payload
-
-### 6.2 Critical Bugs
-
-#### BUG-REFX-1 · `QualityGates` used in `__init__` but not imported at top of file
-
-```python
-class ReflexionEngine(Agent):
-    def __init__(self, model_name: Optional[str] = None):
-        ...
-        self.quality_gates = QualityGates()  # NameError — not imported
-```
-
-`QualityGates` is not in the imports section. The reflexion agent crashes on instantiation with `NameError: name 'QualityGates' is not defined`. This means the entire reflexion/fix pipeline has never run successfully.
-
-**Fix:** Add to imports:
-
-```python
-from foundry.testing.quality_gates import QualityGates
-```
-
----
-
-#### BUG-REFX-2 · Fix path returns `"fix_plan"` string only — orchestrator cannot propagate updated code
-
-On the fix path (when execution fails but retries remain), `execute_and_fix()` returns:
-
-```python
-payload={
-    "status": "needs_fixes",
-    "fix_plan": fix_plan,         # text only
-    "error": error_context,
-    "execution_history": execution_history
-}
-```
-
-There is no `"code_repo"` key on the fix path. The orchestrator's `_reflexion_node` extracts `fix_plan` and puts it in `review_feedback`, but never updates `project_context["code_repo"]`. The engineer on the next loop receives the same broken code.
-
-**Fix:** Return the current (partially fixed) repo even when fixes still need application:
-
-```python
-return AgentMessage(
-    payload={
-        "status": "needs_fixes",
-        "fix_plan": fix_plan,
-        "code_repo": current_repo,   # add this
-        "error": error_context,
-    }
-)
-```
-
----
-
-#### BUG-REFX-3 · `MAX_RETRY_ATTEMPTS = 5` × orchestrator `MAX_REFLEXION_RETRIES = 3` = 15 total attempts
-
-Each orchestrator reflexion cycle calls `execute_and_fix()` which internally loops up to 5 times. The outer orchestrator loop allows up to 3 reflexion cycles. This is 5 × 3 = 15 sandbox executions and 15+ LLM calls before final failure. On a 7B model with no concurrency limit, this takes 45-90 minutes and reliably OOMs or times out.
-
-**Fix:** Reduce internal `MAX_RETRY_ATTEMPTS` to 2. Let the orchestrator's outer loop handle escalation:
-
-```python
-MAX_RETRY_ATTEMPTS = 2  # inner loop; orchestrator provides outer retry
-```
-
----
-
-### 6.3 High Issues
-
-#### HIGH-REFX-1 · Fix generation always targets only the entry point file
-
-```python
-# Comment in code:
-# For multi-file, we currently focus on the entry point or use LLM to decide
-```
-
-The LLM fix plan is generated for the entire repo but applied via `apply_fixes()` which targets a single `Code` object. Integration errors (wrong imports, mismatched function signatures across files) in multi-file projects are never addressed.
-
-#### HIGH-REFX-2 · `_generate_llm_fixes()` hardcodes Python in fix prompt
-
-```python
-system_prompt = """You are an expert code debugger and fixer.
-ABSOLUTE REQUIREMENT: You MUST fix the code using ONLY Python 3.11+.
-PROHIBITED: Do NOT suggest Node.js, React, npm, or JavaScript solutions.
-"""
-```
-
-Fixes for JS or Java errors will be Python code.
-
-#### HIGH-REFX-3 · KG impact analysis uses `project_id="current"` fallback in `reflect_on_feedback()`
-
-```python
-context_data = await self.kg_tools.get_component_context(
-    project_id="current",  # hardcoded fallback
-    component_name="main"
-)
-```
-
-`"current"` is not a real project ID. The query returns nothing. This KG integration always silently fails.
-
----
-
-### 6.4 Medium Issues
-
-#### MED-REFX-1 · `dependencies` list not threaded through to `create_sandbox()`
-
-`execute_and_fix()` extracts dependencies from `requirements.txt` but the `execute_code()` call signature passes `dependencies` to `environment.execute_code()`. The sandbox `create_sandbox()` receives dependencies only if they were in the original payload — the extracted list from `requirements.txt` parsing is not forwarded.
-
-#### MED-REFX-2 · Successful fixes not stored in KG for cross-project learning
-
-When `result.success` is True, there is no call to store the successful fix pattern. The KG remains empty of error-fix pairs, making cross-project learning impossible.
-
----
-
-## 7. DevOps Agent
-
-**File:** `src/foundry/agents/devops.py`  
-**Class:** `DevOpsAgent`
-
-### 7.1 What Is Implemented
-
-- Single method `prepare_deployment()` that generates Dockerfile and docker-compose.yml
-- JSON parsing with markdown fence stripping
-- `json_mode=True` on LLM call
-
-### 7.2 Critical Bugs
-
-#### BUG-DEV-1 · `code_repo` is received but never used
-
-```python
-async def process_message(self, message: AgentMessage) -> AgentMessage:
-    architecture = message.payload.get("architecture")
-    code_repo = message.payload.get("code_repo")  # received
-    return await self.prepare_deployment(architecture, code_repo)
-
-async def prepare_deployment(self, architecture: ..., code_repo: Optional[str] = None) -> AgentMessage:
-    user_prompt = f"Here is the system architecture:\n\n{architecture}"  # code_repo ignored
-```
-
-The Dockerfile is generated without knowing: what Python dependencies exist, what the actual entry point is, what ports the app uses, or what environment variables are needed. Generated Dockerfiles will not work for any specific project.
-
----
-
-#### BUG-DEV-2 · Bare `except` swallows all JSON parse failures silently
-
-```python
-try:
-    deployment_data = json.loads(deployment_data)
-except:
-    deployment_data = {}
-```
-
-When JSON parsing fails (common with 7B models), `deployment_data` silently becomes `{}`. The orchestrator iterates over an empty dict, stores no artifacts, and reports success. The DevOps stage is a silent no-op on failure. Use specific exception handling and log failures.
-
----
-
-#### BUG-DEV-3 · Entire AWS CDK requirement (Req 7) unimplemented
-
-Requirements 7.1-7.6 mandate AWS CDK generation, `cdk synth` validation, `cdk bootstrap` detection, and `cdk deploy` execution. The current implementation generates only a Dockerfile and docker-compose.yml. This is a Phase 2 item — but the requirements doc marks it as `✓` implemented, which is incorrect.
-
----
-
-### 7.3 High Issues
-
-#### HIGH-DEV-1 · Agent is entirely Python-only — no language awareness
-
-The system prompt says "RESTRICTION: Project is ALWAYS Python-based" and hardcodes `python:3.11-slim` as the base image. JS projects need `node:20-slim`, Java projects need `eclipse-temurin:21-jdk-slim`.
-
-#### HIGH-DEV-2 · `recipient` in returned `AgentMessage` is `AgentType.ENGINEER`
-
-```python
-return AgentMessage(
-    sender=self.agent_type,
-    recipient=AgentType.ENGINEER,  # wrong
-    ...
-)
-```
-
-DevOps is the last stage — recipient should be `AgentType.ORCHESTRATOR` or the field should be irrelevant. Copy-pasted from engineer agent template.
-
----
-
-### 7.4 Medium Issues
-
-#### MED-DEV-1 · No `.dockerignore`, `.env.example`, or `GitHub Actions` workflow generated
-
-A minimal viable deployment package requires at minimum a `.dockerignore` to avoid copying `__pycache__`, `.git`, `venv` into the image, and a `.env.example` as required by Req 15.3.
-
----
-
-## 8. Cross-Cutting Issues
-
-These issues affect multiple agents and must be solved systemically rather than in each agent individually.
-
-### 8.1 No `language` field in LangGraph state or project model
-
-Every single agent currently determines language through local heuristics or hardcoded values. The fundamental fix is:
-
-1. Add `language: str` and `framework: str` to `GraphState`
-2. Accept `language` in `ProjectCreateRequest`
-3. Pass from `run()` through every node into every agent message payload
-4. Each agent reads `language` from its message payload, not from its own detection logic
-
-Until this is done, multi-language support requires patching every individual agent.
-
-### 8.2 No shared `language_config.py` module
-
-Every language-specific constant (extensions, linters, test frameworks, Docker images, coding standards, entry points, package files) is hardcoded in each agent independently. A central `language_config.py` with a `LanguageConfig` dataclass per language eliminates all the individual Python-only hardcoding in a single change.
-
-### 8.3 KG integration is write-only from agents' perspective
-
-The KG is populated via `ingestion_pipeline` after code generation. But the query tools (`get_surgical_context`, `get_project_file_map`, `get_component_context`, `analyze_change_impact`) are either:
-
-- Not called at all (initial generation pass in engineer)
-- Called with hardcoded `project_id="current"` that returns nothing (reflexion legacy path)
-- Called only during fix mode (engineer `_generate_file_content`)
-
-None of the agents store requirements, architecture decisions, or successful fix patterns back into the KG for cross-project learning.
-
-### 8.4 No Ollama concurrency control — timeouts on 7B model
-
-All agents make LLM calls concurrently with no serialization. With Qwen-7B on 8GB VRAM, concurrent requests cause memory spikes and `httpx.ReadTimeout`. There is no class-level `asyncio.Semaphore` and no `num_predict` limit to cap output length.
-
-### 8.5 `print()` statements used for all agent-level logging
-
-Every agent uses bare `print(f"DEBUG: ...")` instead of `logger.info(...)`. Debug output goes to stdout mixed with application logs, cannot be filtered by log level, and writes sensitive data (generated code, error messages) to container stdout.
-
----
-
-## 9. What Has Been Fixed (Since Last Audit)
-
-The following issues identified in prior audits have been resolved in the current codebase:
-
-| Fix ID | Description | Status |
-|--------|-------------|--------|
-| Fix-K | Fresh orchestrator instantiated per project (no cross-project state leakage) | ✅ Done — `main.py` creates fresh `AgentOrchestrator()` per request |
-| Fix-L | Requirements injected as domain anchor into PM, Architect, Engineer prompts | ✅ Done — `grounding_anchor` in all three agents |
-| Fix-1 | `_sanitize_architecture_for_engineer()` added to architect | ✅ Done — but now harmful for multi-language |
-| Fix-2 | Comprehensive `JS_PATTERNS` regex in engineer | ✅ Done — but needs to become language-aware |
-| Fix-3 | 3-attempt recovery loop with auto-stub in engineer | ✅ Done |
-| Fix-4 | Python constraint added to `_request_code_improvements()` | ✅ Done — but now Python-only |
-| Fix-5 | Write-time JS gate in `_store_artifact()` | ✅ Done — but blocks JS/TS/Java projects |
-| Fix-N | Hard fallback PRD template added to PM agent | ✅ Done — but hardcodes Python constraints |
-| Fix-H | Keyword validation gate added to PM agent | ✅ Done — but heuristic logic is inverted |
-| Multi-pass arch | Architect now loops up to 2 times before using fallback | ✅ Done |
-| Incremental repair | Engineer passes `existing_code` as baseline for fix passes | ✅ Done |
-| GraphRAG engineer | `get_surgical_context()` used in engineer during fix mode | ✅ Done |
-| Code review sandbox | QualityGates integration in code review | ✅ Done |
-| Code review JSON | Robust JSON extraction in code review | ✅ Done |
-| Reflexion KG | `analyze_change_impact()` called in execute_and_fix | ✅ Done — but uses wrong project_id |
-| `json` import devops | `json` was missing from devops imports | ✅ Done |
-
----
-
-## 10. Prioritised Fix Checklist
-
-### P0 — Pipeline correctness (must fix before any E2E test can pass)
-
-- [ ] **ORCH-1** — Fix state merge in all 6 orchestrator nodes (use `{**state["project_context"], ...}`)
-- [ ] **ORCH-2** — Fix `"comments"` → `"feedback"` key in `_reflexion_node`
-- [ ] **ORCH-3** — Fix reflexion node to put `code_repo` from response back into `project_context`
-- [ ] **ORCH-4** — Fix `reflexion_count >= MAX_REFLEXION_RETRIES` boundary
-- [ ] **REFX-1** — Add `from foundry.testing.quality_gates import QualityGates` to reflexion.py
-- [ ] **ORCH-1a** — Fix `makedirs` on empty dirname in `_store_artifact`
-
-### P1 — Multi-language foundation (required before JS/Java/TS projects can work)
-
-- [ ] Create `src/foundry/utils/language_config.py` with `LanguageConfig` dataclass for Python, JS, TS, Java
-- [ ] Create `src/foundry/utils/language_guards.py` with `detect_actual_language()` and `is_wrong_language()`
-- [ ] Add `language: str` and `framework: str` to `GraphState`
-- [ ] Accept `language` in `ProjectCreateRequest` and thread through `run()` → all node payloads
-- [ ] **ENG-1** — Replace `language = "python"` hardcode with language from message payload
-- [ ] **ENG-2** — Make `_request_code_improvements()` language-parameterized
-- [ ] **ENG-3** — Remove last-mile filename renaming loop (replace with language-aware validation)
-- [ ] **ARCH-1** — Replace `_sanitize_architecture_for_engineer()` with language-aware sanitization
-- [ ] **ARCH-2** — Parse and normalize architecture JSON before forwarding to engineer
-- [ ] **REV-2** — Make code review system prompt language-parameterized
-- [ ] **DEV-1** — Use `code_repo` in devops to extract deps, entry point, and port information
-- [ ] **DEV-1a** — Use `get_config(language).docker_base_image` instead of hardcoded Python image
-- [ ] **ORCH-2a** — Remove `.js`, `.ts`, `.java` from `forbidden_exts` in `_store_artifact`
-- [ ] **PM-3** fallback — Remove `"Python 3.11+"` from PM fallback template constraints
-
-### P2 — Quality and reliability improvements
-
-- [ ] **PM-1** — Add `_extract_json()` with fence stripping and regex fallback to PM agent
-- [ ] **PM-2** — Expand PRD schema to include `functional_requirements`, `non_functional_requirements`, `acceptance_criteria`, `out_of_scope`
-- [ ] **PM-3** — Implement clarifying question generation for ambiguous inputs (< 15 words)
-- [ ] **PM-1a** — Gate `pm_debug.json` write behind `settings.debug`
-- [ ] **REV-1** — Merge `gate_results.security_issues` and `gate_results.lint_issues` into structured `issues` list
-- [ ] **ORCH-3a** — Pass full `issues` list from review to reflexion payload
-- [ ] **REFX-2** — Return `code_repo` on the fix path (not just on success path)
-- [ ] **REFX-3** — Reduce `MAX_RETRY_ATTEMPTS` to 2 in reflexion
-- [ ] **HIGH-REFX-1** — Implement multi-file fix application in reflexion
-- [ ] **DEV-2** — Replace bare `except` in devops JSON parsing with specific exception + logging
-- [ ] **ORCH-3b** — Add Ollama `asyncio.Semaphore(1)` and `num_predict=2048` limit
-- [ ] **CROSS-5** — Replace all `print()` statements in agents with `logger.info/warning/error()`
-
-### P3 — KG deep integration (requires P0+P1 stable)
-
-- [ ] Add `store_requirement()` to KG service; call from PM agent after PRD generation
-- [ ] Add `store_architecture_decision()` to KG service; call from architect after design
-- [ ] Add `store_error_fix()` to KG service; call from reflexion on success
-- [ ] Add `get_similar_error_fixes()` to KG tools; inject into reflexion fix prompt
-- [ ] Add `get_successful_patterns()` to KG tools; inject into architect design prompt
-- [ ] Add `get_project_summary_for_generation()` call to engineer initial generation (not just fix mode)
-- [ ] Fix reflexion KG call to use real `project_id` instead of `"current"`
-- [ ] Add JS parser (`js_parser.py`) and Java parser (`java_parser.py`) for KG ingestion
-- [ ] Thread `language` into `ingestion_pipeline.ingest_project()` to route to correct parser
-- [ ] Add `Requirement`, `ArchitectureDecision`, `ErrorFix`, `Pattern` node types and Neo4j constraints
-
----
-
-*Audit based on direct source review of:*  
-`orchestrator.py` · `product_manager.py` · `architect.py` · `engineer.py` · `code_review.py` · `reflexion.py` · `devops.py` · `quality_gates.py` · `knowledge_graph_tools.py` · `knowledge_graph.py` · `ingestion.py` · `code_parser.py`
+*Audit based on direct source review of all files in `src/foundry/` including:*  
+*`main.py`, `orchestrator.py`, `config.py`, `database.py`, `redis_client.py`*  
+*`agents/` (all 6 agents + base)*  
+*`api/schemas.py`*  
+*`graph/` (neo4j_client, code_parser, ingestion)*  
+*`llm/` (base, ollama_provider, vllm_provider, factory)*  
+*`middleware/` (auth, rate_limit, security)*  
+*`models/` (project, artifact, approval, api_key, base)*  
+*`sandbox/` (environment, error_analysis)*  
+*`services/` (knowledge_graph, git_service, sandbox_service, agent_control, project_service)*  
+*`testing/` (test_generator, quality_gates)*  
+*`tools/knowledge_graph_tools.py`*  
+*`utils/` (language_config, language_guards)*  
+*`vcs/git_manager.py`*  
+*`tasks.md`, `design.md`, `requirements.md`, `COMPLETE_REQUIREMENTS.md`*

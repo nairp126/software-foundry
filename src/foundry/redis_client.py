@@ -1,8 +1,11 @@
 """Redis client configuration and connection management."""
 
 from typing import Optional
+import logging
 import redis.asyncio as redis
 from foundry.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class RedisClient:
@@ -14,12 +17,19 @@ class RedisClient:
 
     async def connect(self) -> None:
         """Establish connection to Redis."""
-        self._client = await redis.from_url(
-            settings.redis_url,
-            max_connections=settings.redis_max_connections,
-            encoding="utf-8",
-            decode_responses=True,
-        )
+        try:
+            self._client = await redis.from_url(
+                settings.redis_url,
+                max_connections=settings.redis_max_connections,
+                encoding="utf-8",
+                decode_responses=True,
+            )
+            # Test connection
+            await self._client.ping()
+        except Exception as e:
+            logger.warning(f"Failed to connect to Redis at {settings.redis_url}: {e}. "
+                           "Rate limiting and other Redis-dependent features will be degraded.")
+            self._client = None
 
     async def disconnect(self) -> None:
         """Close Redis connection."""
