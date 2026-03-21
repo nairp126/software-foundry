@@ -37,6 +37,7 @@ class Artifact(BaseModel, Base):
         default=ArtifactType.code,
     )
     content = Column(Text, nullable=True)
+    language = Column(String(50), nullable=True, index=True)
     metadata_ = Column("metadata", JSONB, nullable=True)
 
     # Relationships

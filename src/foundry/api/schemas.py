@@ -6,6 +6,9 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+from foundry.models.approval import ApprovalPolicy
+
+
 # ---- Project Schemas ---- #
 
 class ProjectCreateRequest(BaseModel):
@@ -14,6 +17,7 @@ class ProjectCreateRequest(BaseModel):
     description: Optional[str] = None
     language: Optional[str] = "python"
     framework: Optional[str] = None
+    approval_policy: Optional[ApprovalPolicy] = Field(default=ApprovalPolicy.standard)
 
 
 class ProjectResponse(BaseModel):

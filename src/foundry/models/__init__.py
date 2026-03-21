@@ -12,11 +12,12 @@ from foundry.models.approval import (
     ApprovalRequestCreate,
 )
 from foundry.models.api_key import APIKey
+from foundry.models.execution import AgentExecution
 
 __all__ = [
     "Project", "ProjectStatus",
     "Artifact", "ArtifactType",
     "ApprovalRequest", "ApprovalStatus", "ApprovalType", "ApprovalPolicy",
     "ApprovalContent", "ApprovalResponse", "ApprovalRequestCreate",
-    "APIKey",
+    "APIKey", "AgentExecution",
 ]

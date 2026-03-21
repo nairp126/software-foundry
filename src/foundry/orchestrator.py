@@ -143,6 +143,9 @@ class AgentOrchestrator:
         response = await self.pm_agent.process_message(message)
         prd = response.payload.get("prd", "") if response else ""
         
+        # Save PRD to project model
+        await self._update_project_fields(state["project_id"], {"prd": prd})
+        
         # Store PRD artifact
         if prd:
             await self._store_artifact(
@@ -186,6 +189,9 @@ class AgentOrchestrator:
         
         response = await self.architect_agent.process_message(message)
         architecture = response.payload.get("architecture", "") if response else ""
+        
+        # Save architecture to project model
+        await self._update_project_fields(project_id, {"architecture": architecture})
         
         # Store Architecture artifact
         if architecture:
@@ -321,6 +327,9 @@ class AgentOrchestrator:
         is_approved = review_results.get("status") == "APPROVED"
         review_results["approved"] = is_approved
 
+        # Save code review to project model
+        await self._update_project_fields(state["project_id"], {"code_review": review_results})
+        
         # Store review as artifact
         await self._store_artifact(
             state["project_id"],
@@ -473,6 +482,22 @@ class AgentOrchestrator:
         
         return "fix"
 
+    async def _update_project_fields(self, project_id: str, fields: Dict[str, Any]):
+        """Update multiple fields on a project record."""
+        async with AsyncSessionLocal() as session:
+            try:
+                result = await session.execute(
+                    select(Project).where(Project.id == project_id)
+                )
+                project = result.scalar_one_or_none()
+                if project:
+                    for key, value in fields.items():
+                        setattr(project, key, value)
+                    await session.commit()
+            except Exception as e:
+                await session.rollback()
+                logger.error(f"Failed to update fields for project {project_id}: {e}")
+
     async def _update_project_status(self, project_id: str, status: ProjectStatus):
         """Update project status in database."""
         async with AsyncSessionLocal() as session:
@@ -487,6 +512,33 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.error(f"Failed to update project status: {e}")
                 await session.rollback()
+
+    async def _log_execution(
+        self,
+        project_id: str,
+        agent_type: str,
+        status: str,
+        start_time: Optional[int] = None,
+        duration: Optional[float] = None,
+        error: Optional[str] = None
+    ):
+        """Log an agent execution record."""
+        from foundry.models.execution import AgentExecution
+        async with AsyncSessionLocal() as session:
+            try:
+                execution = AgentExecution(
+                    project_id=project_id,
+                    agent_type=agent_type,
+                    status=status,
+                    start_time=start_time,
+                    duration_seconds=duration,
+                    error_message=error
+                )
+                session.add(execution)
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                logger.error(f"Failed to log agent execution: {e}")
 
     async def _store_artifact(self, project_id: str, name: str, content: str, artifact_type: ArtifactType, language: str = "python"):
         """Store generated artifact in database and filesystem."""
@@ -534,13 +586,15 @@ class AgentOrchestrator:
                 
                 if existing:
                     existing.content = content
+                    existing.language = language
                     existing.updated_at = datetime.utcnow()
                 else:
                     artifact = Artifact(
                         project_id=project_id,
                         filename=name,
                         content=content,
-                        artifact_type=artifact_type
+                        artifact_type=artifact_type,
+                        language=language
                     )
                     session.add(artifact)
                 

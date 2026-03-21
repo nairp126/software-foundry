@@ -6,6 +6,12 @@ from fastapi import Request, Response, HTTPException, status
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from foundry.redis_client import redis_client
+from foundry.database import AsyncSessionLocal
+from foundry.models.api_key import APIKey
+from sqlalchemy import select
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -38,14 +44,20 @@ class RateLimitMiddleware:
 
         # Check rate limit (do this for all requests to get remaining/reset headers)
         try:
+            limit = self.default_limit
+            if api_key:
+                limit = await self._get_api_key_limit(api_key)
+                
             is_allowed, remaining, reset_time = await self._check_rate_limit(
                 identifier,
-                self.default_limit,
+                limit,
                 self.window_seconds,
             )
-        except Exception:
+        except Exception as e:
             # Redis unavailable — allow the request through
+            logger.warning(f"Rate limiting failed: {e}. Defaulting to allowing request.")
             is_allowed, remaining, reset_time = True, self.default_limit, time.time() + self.window_seconds
+            limit = self.default_limit
         
         if not is_allowed and not is_bypassed:
             wait_time = int(reset_time - time.time())
@@ -54,7 +66,7 @@ class RateLimitMiddleware:
                 "status": status.HTTP_429_TOO_MANY_REQUESTS,
                 "headers": [
                     (b"content-type", b"application/json"),
-                    (b"x-ratelimit-limit", str(self.default_limit).encode()),
+                    (b"x-ratelimit-limit", str(limit).encode()),
                     (b"x-ratelimit-remaining", b"0"),
                     (b"x-ratelimit-reset", str(int(reset_time)).encode()),
                     (b"retry-after", str(wait_time).encode()),
@@ -70,7 +82,7 @@ class RateLimitMiddleware:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
                 # Update headers with rate limit info
-                headers.append((b"X-RateLimit-Limit", str(self.default_limit).encode()))
+                headers.append((b"X-RateLimit-Limit", str(limit).encode()))
                 headers.append((b"X-RateLimit-Remaining", str(remaining).encode()))
                 headers.append((b"X-RateLimit-Reset", str(int(reset_time)).encode()))
                 message["headers"] = headers
@@ -114,3 +126,35 @@ class RateLimitMiddleware:
         reset_time = now + window
         
         return is_allowed, remaining, reset_time
+
+    async def _get_api_key_limit(self, api_key: str) -> int:
+        """Get custom rate limit from Redis cache or database."""
+        redis = redis_client.client
+        cache_key = f"api_key_limit:{api_key[:8]}"  # Prefix-based cache key
+        
+        # 1. Try Redis cache
+        cached_limit = await redis.get(cache_key)
+        if cached_limit:
+            return int(cached_limit)
+        
+        # 2. Try Database lookup
+        try:
+            async with AsyncSessionLocal() as session:
+                # API keys are stored as prefix/hashes, but identifier here is likely the key from the header
+                # Middleware 'identifier' logic says it uses 'api_key' if provided.
+                # Actually, the APIKey class has get_key_prefix(key).
+                prefix = APIKey.get_key_prefix(api_key)
+                result = await session.execute(
+                    select(APIKey).where(APIKey.key_prefix == prefix, APIKey.is_active == True)
+                )
+                key_record = result.scalar_one_or_none()
+                
+                if key_record:
+                    limit = key_record.rate_limit_per_minute
+                    # Cache in Redis for 10 minutes
+                    await redis.set(cache_key, str(limit), ex=600)
+                    return limit
+        except Exception as e:
+            logger.error(f"Failed to lookup API key limit in DB: {e}")
+            
+        return self.default_limit
