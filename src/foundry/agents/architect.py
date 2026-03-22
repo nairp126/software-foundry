@@ -153,9 +153,14 @@ class ArchitectAgent(Agent):
                         )
                     ))
 
-        # Only apply sanitization for Python projects (non-Python projects keep their terms)
+        # Apply sanitization ONLY to cross-language legacy overrides (Cross-Lang Gate)
+        # If it's a Python project, we may want to ensure we don't accidentally leak Node logic
+        # if the Architect got confused, but we must NOT do this for other languages.
         if language.lower() == "python":
             architecture_content = self._sanitize_architecture_for_engineer(architecture_content)
+
+        # Parse final architecture to dictionary for the Engineer (HIGH-ARCH-2)
+        final_arch_dict = self._extract_json(architecture_content)
 
         # KG: store architecture decision (Req 16.3)
         if self.kg_tools:
@@ -169,14 +174,28 @@ class ArchitectAgent(Agent):
                     language=language,
                     framework=web_framework,
                 )
+                # KG: store as a reusable pattern (Req 16.5)
+                await knowledge_graph_service.store_pattern(
+                    project_id=project_id,
+                    name=final_arch_dict.get("high_level_design") or f"Standard {lang_name} {web_framework} Pattern",
+                    description=f"Architecture pattern for {lang_name} using {web_framework}",
+                    language=language,
+                    code_snippet=architecture_content[:2000],
+                )
             except Exception as e:
-                logger.warning(f"store_architecture_decision failed (non-blocking): {e}")
+                logger.warning(f"Architect Agent KG store failed: {e}")
 
         return AgentMessage(
             sender=self.agent_type,
             recipient=AgentType.ENGINEER,
             message_type=MessageType.TASK,
-            payload={"architecture": architecture_content, "prd": prd_content}
+            payload={
+                "architecture": final_arch_dict, 
+                "prd": prd_content,
+                "language": language,
+                "framework": web_framework,
+                "project_id": project_id
+            }
         )
 
     async def _architect_node(self, state: Dict[str, Any]) -> Dict[str, Any]:

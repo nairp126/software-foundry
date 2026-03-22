@@ -428,6 +428,7 @@ class ReflexionEngine(Agent):
                     payload={
                         "status": "success",
                         "code_repo": current_repo,
+                        "fix_plan": "Self-healing loop succeeded in applying fixes.",
                         "result": {
                             "stdout": result.stdout,
                             "stderr": result.stderr,
@@ -504,6 +505,21 @@ class ReflexionEngine(Agent):
                 current_repo = self._apply_fix_plan_to_repo(current_repo, fix_plan_dict)
                 logger.info(f"Reflexion applied fix plan covering {len(fix_plan_dict.get('files', {}))} files.")
                 
+                # KG: store the error fix for future retrieval (Req 16.2)
+                try:
+                    from foundry.services.knowledge_graph import knowledge_graph_service
+                    fixed_snippet = next(iter(fix_plan_dict.get("files", {}).values()), "")[:500]
+                    await knowledge_graph_service.store_error_fix(
+                        project_id=project_id,
+                        error_type=analysis.error_type,
+                        error_message=analysis.error_message,
+                        fix_description=fix_plan_dict.get("explanation", "Auto-fix by ReflexionEngine"),
+                        fixed_code=fixed_snippet,
+                        language=language,
+                    )
+                except Exception as e:
+                    logger.warning(f"Reflexion Agent KG store failed: {e}")
+                
             except Exception as e:
                 logger.error(f"Failed to apply reflexion fix plan: {e}")
                 # If we fail to parse, we exit this cycle so orchestrator can retry or move on
@@ -517,6 +533,7 @@ class ReflexionEngine(Agent):
             payload={
                 "status": "needs_fixes",
                 "code_repo": current_repo,
+                "fix_plan": fix_plan_dict.get("explanation", "Max retries reached") if 'fix_plan_dict' in locals() else "Unknown failure",
                 "execution_history": execution_history,
                 "error": error_context if 'error_context' in locals() else "Unknown failure"
             }

@@ -135,12 +135,12 @@ class EngineerAgent(Agent):
         from foundry.utils.language_guards import detect_language_mismatch
         from foundry.utils.language_config import get_language_config
 
-        # Step 1: Plan file structure
-        file_structure = await self._plan_file_structure(architecture_content, prd_content, language=graph_state_language or "python")
-
-        # Step 2: Detect language from GraphState
+        # Step 1: Detect language from GraphState (Priority)
         language = self._detect_language(architecture_content, graph_state_language)
         lang_config = get_language_config(language)
+
+        # Step 2: Plan file structure with detected language
+        file_structure = await self._plan_file_structure(architecture_content, prd_content, language=language)
 
         # Step 3: Generate code for each file sequentially for stability
         generated_files = {}
@@ -193,6 +193,7 @@ class EngineerAgent(Agent):
         for filename, content in generated_files.items():
             f_clean = filename.strip()
             # ONLY rename if the language is python AND we have a mismatch
+            # This ensures we don't break JS/TS/Go/Java projects (HIGH-ENG-1)
             if language == "python" and not f_clean.endswith(".py") and "." in f_clean:
                 # Basic safety: if it's clearly a code file but not .py, rename it
                 name_part, ext_part = os.path.splitext(f_clean)
@@ -312,10 +313,13 @@ class EngineerAgent(Agent):
         if graph_state_language and graph_state_language.strip():
             return graph_state_language.lower().strip()
         
-        # Fallback: simple inspection of architecture string
-        if "java" in architecture_content.lower(): return "java"
-        if "javascript" in architecture_content.lower() or "node.js" in architecture_content.lower(): return "javascript"
-        if "typescript" in architecture_content.lower(): return "typescript"
+        # Fallback: inspection of architecture content
+        arch_str = str(architecture_content).lower()
+        if "java" in arch_str: return "java"
+        if "node" in arch_str or "javascript" in arch_str or "express" in arch_str: return "javascript"
+        if "typescript" in arch_str or " ts " in arch_str: return "typescript"
+        if "rust" in arch_str or " cargo " in arch_str: return "rust"
+        if " go " in arch_str or "golang" in arch_str: return "go"
         
         return "python"
 

@@ -19,35 +19,43 @@ class ProductManagerAgent(Agent):
         self.llm = LLMProviderFactory.create_provider(model_name=self.model_name)
 
     def _extract_json(self, content: str) -> dict:
-        """Strip markdown fences, parse JSON, handle multiple blocks, return {} on failure."""
+        """Strip markdown fences, parse JSON, handle multiple blocks, return {} on failure.
+        
+        Uses a more robust approach with regex-based code block extraction and recursive 
+        brace matching fallback (Req 17.4).
+        """
         if not content:
             return {}
         
-        # Try to find outermost JSON object (Fix: handle nested braces correctly)
+        # 1. Try to find JSON block in markdown fences
+        json_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', content)
+        if json_block_match:
+            try:
+                data = json.loads(json_block_match.group(1).strip())
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                pass
+
+        # 2. Try to find the outermost { ... } (Greedy match)
         start = content.find("{")
         end = content.rfind("}")
         
         if start != -1 and end != -1 and end > start:
-            json_str = content[start : end + 1]
+            json_candidate = content[start : end + 1]
             try:
-                data = json.loads(json_str)
+                data = json.loads(json_candidate)
                 if isinstance(data, dict):
                     return data
-            except Exception:
-                # If direct chunk fails, try more aggressive stripping
-                pass
-
-        # Fallback to regex-based extraction for multiple smaller objects if needed
-        # (Though usually for PRD we want the big one)
-        json_pattern = r'\{[\s\S]*\}' # Greedy match to find the largest possible block
-        match = re.search(json_pattern, content)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
+            except json.JSONDecodeError:
+                # 3. Last resort: Clean trailing commas and try again
+                try:
+                    cleaned = re.sub(r",\s*([}\]])", r"\1", json_candidate)
+                    data = json.loads(cleaned)
+                    if isinstance(data, dict):
+                        return data
+                except Exception:
+                    pass
                 
         return {}
 
@@ -77,6 +85,11 @@ class ProductManagerAgent(Agent):
             "core_features": ["list of strings"],
             "functional_requirements": ["list of strings"],
             "user_stories": ["list of strings"],
+            "api_specification": {{
+                "patterns": "string (e.g. REST, GraphQL)",
+                "critical_endpoints": ["list of strings with method and purpose"]
+            }},
+            "ui_ux_recommendations": ["list of usability and design pointers"],
             "non_functional_requirements": {{
                 "security": ["list of strings"],
                 "scalability": ["list of strings"],
@@ -86,7 +99,7 @@ class ProductManagerAgent(Agent):
             "data_model_overview": ["list of strings describing entities and relationships"],
             "acceptance_criteria": ["list of strings"],
             "technical_constraints": ["list of strings"],
-            "clarifying_questions": ["list of strings"]
+            "clarifying_questions": ["list of required strings to finalize project details"]
         }}
 
         CRITICAL CONSTRAINTS:
@@ -94,7 +107,7 @@ class ProductManagerAgent(Agent):
         2. RETURN ONLY THE JSON OBJECT. NO MARKDOWN, NO EXPLANATIONS.
         3. DO NOT use a list for 'non_functional_requirements'. It MUST be a dictionary with keys: 'security', 'scalability', 'performance'.
         4. Include a detailed 'data_model_overview' of at least 3 entities.
-        {"5. Ambiguous prompt — 'clarifying_questions' MUST be non-empty." if short_prompt else ""}
+        5. 'clarifying_questions' MUST be non-empty. Ask at least 3 deep architectural or business logic questions.
         """
         
         messages = [
@@ -118,12 +131,14 @@ class ProductManagerAgent(Agent):
                 "core_features": [],
                 "functional_requirements": [],
                 "user_stories": [],
+                "api_specification": {"patterns": "REST", "critical_endpoints": []},
+                "ui_ux_recommendations": [],
                 "non_functional_requirements": {"security": [], "scalability": [], "performance": []},
                 "out_of_scope": [],
                 "data_model_overview": [],
                 "acceptance_criteria": [],
                 "technical_constraints": [],
-                "clarifying_questions": []
+                "clarifying_questions": ["What is the primary user role?", "Are there specific external integrations?", "What is the expected initial traffic volume?"]
             }
             if not isinstance(data, dict): return defaults
             
@@ -134,7 +149,7 @@ class ProductManagerAgent(Agent):
                     data["non_functional_requirements"] = {
                         "security": [s for s in old_nfr if "security" in s.lower() or "auth" in s.lower()],
                         "scalability": [s for s in old_nfr if "scale" in s.lower() or "load" in s.lower()],
-                        "performance": [s for s in old_nfr if s not in data["non_functional_requirements"]["security"] and s not in data["non_functional_requirements"]["scalability"]]
+                        "performance": [s for s in old_nfr if s not in (data["non_functional_requirements"].get("security", []) + data["non_functional_requirements"].get("scalability", []))]
                     }
                 else:
                     data["non_functional_requirements"] = defaults["non_functional_requirements"]
@@ -198,8 +213,8 @@ class ProductManagerAgent(Agent):
             else:
                 prd_dict = self._extract_json(raw_content)
         
-        # Ensure short prompts always have clarifying_questions (Req 17.3)
-        if short_prompt and isinstance(prd_dict, dict) and not prd_dict.get("clarifying_questions"):
+        # Ensure clarifying_questions are always populated (Req 17.3 + HIGH-PM-1)
+        if isinstance(prd_dict, dict) and not prd_dict.get("clarifying_questions"):
             prd_dict["clarifying_questions"] = [
                 "What is the target user base?",
                 "What is the expected scale?",
@@ -211,7 +226,14 @@ class ProductManagerAgent(Agent):
         try:
             features = prd_dict.get("core_features", [])
             user_stories = prd_dict.get("user_stories", [])
-            all_reqs = features + user_stories
+            func_reqs = prd_dict.get("functional_requirements", [])
+            nfrs = []
+            if isinstance(prd_dict.get("non_functional_requirements"), dict):
+                for category in prd_dict["non_functional_requirements"].values():
+                    if isinstance(category, list):
+                        nfrs.extend(category)
+            
+            all_reqs = features + user_stories + func_reqs + nfrs
             if all_reqs:
                 from foundry.services.knowledge_graph import knowledge_graph_service
                 # Fix MED-PM-2: Use real project_id instead of slicing project_name

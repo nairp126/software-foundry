@@ -92,7 +92,7 @@ class CodeReviewAgent(Agent):
             dynamic_context += f"Summary:\n{gate_results.summary}\n"
 
             if gate_results.security_issues:
-                dynamic_context += "\nSecurity Risks detected by Bandit:\n"
+                dynamic_context += f"\nSecurity Risks detected by automated security scans for {language}:\n"
                 for issue in gate_results.security_issues:
                     dynamic_context += f"- [{issue.severity.value.upper()}] {issue.file}:{issue.line}: {issue.description}\n"
 

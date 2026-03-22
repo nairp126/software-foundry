@@ -14,6 +14,8 @@ BASE_IMAGES = {
     "javascript": "node:20-alpine",
     "typescript": "node:20-alpine",
     "java": "eclipse-temurin:21-jre-alpine",
+    "go": "golang:1.21-alpine",
+    "rust": "rust:1.75-slim",
 }
 
 
@@ -76,6 +78,9 @@ class DevOpsAgent(Agent):
         Generate deployment configuration files for a {language} project.
         
         BASE IMAGE: {base_image}
+        
+        CRITICAL: Use the provided File List and Dependency Context to ensure the Dockerfile 
+        correctly handles the project structure and dependency management for {language}.
         
         You MUST generate the following files:
         1. `Dockerfile`: Optimized for production (multi-stage build if applicable).
