@@ -2,6 +2,7 @@ import pytest
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
 from foundry.orchestrator import merge_dicts, AgentOrchestrator, GraphState
+from foundry.redis_client import redis_client
 from foundry.middleware.rate_limit import RateLimitMiddleware
 from foundry.models.project import ProjectStatus
 
@@ -20,7 +21,7 @@ def test_state_reducer_merge():
 async def test_rate_limit_logic_sliding_window():
     """Test the sliding window logic in RateLimitMiddleware."""
     # Mock redis
-    mock_redis = AsyncMock()
+    mock_redis = MagicMock()
     mock_pipe = AsyncMock()
     mock_redis.pipeline.return_value = mock_pipe
     
@@ -28,8 +29,9 @@ async def test_rate_limit_logic_sliding_window():
     # Simulate first request (count is 0)
     mock_pipe.execute.return_value = [0, 0, 1, True]
     
-    with patch("foundry.redis_client.redis_client.client", mock_redis):
-        middleware = RateLimitMiddleware(MagicMock())
+    middleware = RateLimitMiddleware(MagicMock())
+    # Manually inject the mock client into the middleware's redis_client instance
+    with patch.object(redis_client, "_client", mock_redis):
         is_allowed, remaining, reset_time = await middleware._check_rate_limit("test_user", 5, 60)
         
         assert is_allowed is True
@@ -38,8 +40,7 @@ async def test_rate_limit_logic_sliding_window():
         
     # Simulate being at the limit
     mock_pipe.execute.return_value = [0, 5, 1, True]
-    with patch("foundry.redis_client.redis_client.client", mock_redis):
-        middleware = RateLimitMiddleware(MagicMock())
+    with patch.object(redis_client, "_client", mock_redis):
         is_allowed, remaining, reset_time = await middleware._check_rate_limit("test_user", 5, 60)
         
         assert is_allowed is False

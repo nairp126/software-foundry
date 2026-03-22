@@ -13,12 +13,16 @@ from foundry.services.project_service import ProjectService
 @pytest.fixture
 def test_projects_dir(tmp_path):
     """Create a temporary directory for test projects."""
+    import stat
     projects_dir = tmp_path / "test_projects"
     projects_dir.mkdir()
     yield str(projects_dir)
     # Cleanup
     if projects_dir.exists():
-        shutil.rmtree(projects_dir)
+        def remove_readonly(func, path, _):
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        shutil.rmtree(projects_dir, onerror=remove_readonly)
 
 
 @pytest.fixture

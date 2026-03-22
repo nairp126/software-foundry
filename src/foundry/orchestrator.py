@@ -24,7 +24,7 @@ from foundry.agents import (
 from foundry.database import AsyncSessionLocal
 from foundry.models.project import Project, ProjectStatus
 from foundry.models.artifact import Artifact, ArtifactType
-from foundry.services.git_service import git_service
+from foundry.vcs.git_manager import GitManager, CommitType
 from foundry.services.knowledge_graph import KnowledgeGraphService
 from foundry.graph.ingestion import ingestion_pipeline
 from foundry.config import settings
@@ -297,6 +297,21 @@ class AgentOrchestrator:
                 ArtifactType.code, # Or create ArtifactType.test if preferred, for now using code
                 state.get("language", "python")
             )
+            
+        # TRACK GENERATED CODE IN GIT
+        try:
+            project_path = os.path.join(settings.generated_projects_path, state["project_id"])
+            git_manager = GitManager(project_path)
+            # Initialize repo right before committing just in case
+            git_manager.initialize_repository()
+            git_manager.create_commit(
+                commit_type=CommitType.FEAT,
+                description=f"Engineer generated codebase for {state.get('language', 'python')} project",
+                scope="engineer"
+            )
+            logger.info(f"Committed generated code to Git for project {state['project_id']}")
+        except Exception as e:
+            logger.error(f"Git commit failed for project {state['project_id']}: {e}")
             
         # EARLY INGESTION: Ingest into Knowledge Graph after first generation or repair
         try:

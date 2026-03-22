@@ -84,16 +84,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Check for pending migrations
     try:
         # Run alembic check to see if migrations are up to date
-        # Note: In a production environment, you might want to run 'upgrade head'
-        # but for safety we just check and log here.
-        result = subprocess.run(
-            [sys.executable, "-m", "alembic", "check"],
-            capture_output=True,
-            text=True,
-            check=False
+        # SANDBOX-BUG-1 related: Use async subprocess to avoid blocking during startup
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "alembic", "check",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
-        if result.returncode != 0:
-            logger.warning(f"Database migrations are not up to date!\n{result.stderr or result.stdout}")
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            logger.warning(f"Database migrations are not up to date!\n{stderr.decode() or stdout.decode()}")
         else:
             logger.info("Database migrations are up to date.")
     except Exception as e:

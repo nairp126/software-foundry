@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import stat
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from foundry.models.project import Project, ProjectStatus
-from foundry.services.git_service import git_service
+from foundry.vcs.git_manager import GitManager
 from foundry.services.knowledge_graph import knowledge_graph_service
 from foundry.graph.ingestion import ingestion_pipeline
 
@@ -69,8 +70,12 @@ class ProjectService:
         project_dir = self._get_project_path(project.id)
         self._create_directory_structure(project_dir)
         
-        # Initialize Git repository
-        git_service.init_repo(project_dir)
+        # Initialize Git repository using the comprehensive GitManager
+        try:
+            git_manager = GitManager(project_dir)
+            git_manager.initialize_repository()
+        except Exception as e:
+            print(f"Warning: Failed to initialize Git repository: {e}")
         
         # Store the generated path
         project.generated_path = project_dir
@@ -225,7 +230,10 @@ class ProjectService:
         # Step 3: Remove local files
         try:
             if project.generated_path and os.path.exists(project.generated_path):
-                shutil.rmtree(project.generated_path)
+                def remove_readonly(func, path, _):
+                    os.chmod(path, stat.S_IWRITE)
+                    func(path)
+                shutil.rmtree(project.generated_path, onerror=remove_readonly)
                 result["steps_completed"].append("local_files_removed")
         except Exception as e:
             result["errors"].append(f"File cleanup failed: {str(e)}")
