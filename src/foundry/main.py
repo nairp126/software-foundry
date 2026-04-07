@@ -708,10 +708,17 @@ async def delete_api_key(
     result = await db.execute(
         select(APIKey).where(APIKey.id == key_id)
     )
-    api_key = result.scalar_one_or_none()
-    if not api_key:
+    api_key_to_delete = result.scalar_one_or_none()
+    if not api_key_to_delete:
         raise HTTPException(status_code=404, detail="API key not found")
-    await db.delete(api_key)
+    
+    # Check if caller is master key or the owner
+    import uuid
+    is_master = api_key.id == uuid.UUID(int=0)
+    if not is_master and api_key.id != api_key_to_delete.id:
+        raise HTTPException(status_code=403, detail="Permission denied: can only delete own keys or requires master key")
+
+    await db.delete(api_key_to_delete)
     await db.commit()
 
 
@@ -725,24 +732,30 @@ async def deactivate_api_key(
     result = await db.execute(
         select(APIKey).where(APIKey.id == key_id)
     )
-    api_key = result.scalar_one_or_none()
-    if not api_key:
+    api_key_to_deactivate = result.scalar_one_or_none()
+    if not api_key_to_deactivate:
         raise HTTPException(status_code=404, detail="API key not found")
     
-    api_key.is_active = False
+    # Check if caller is master key or the owner
+    import uuid
+    is_master = api_key.id == uuid.UUID(int=0)
+    if not is_master and api_key.id != api_key_to_deactivate.id:
+        raise HTTPException(status_code=403, detail="Permission denied: can only deactivate own keys or requires master key")
+
+    api_key_to_deactivate.is_active = False
     await db.commit()
-    await db.refresh(api_key)
+    await db.refresh(api_key_to_deactivate)
     
     return APIKeyResponse(
-        id=api_key.id,
-        name=api_key.name,
-        key_prefix=api_key.key_prefix,
-            is_active=api_key.is_active,
-            expires_at=api_key.expires_at,
-            last_used_at=api_key.last_used_at,
-            rate_limit_per_minute=api_key.rate_limit_per_minute,
-            created_at=api_key.created_at,
-        )
+        id=api_key_to_deactivate.id,
+        name=api_key_to_deactivate.name,
+        key_prefix=api_key_to_deactivate.key_prefix,
+        is_active=api_key_to_deactivate.is_active,
+        expires_at=api_key_to_deactivate.expires_at,
+        last_used_at=api_key_to_deactivate.last_used_at,
+        rate_limit_per_minute=api_key_to_deactivate.rate_limit_per_minute,
+        created_at=api_key_to_deactivate.created_at,
+    )
 
 
 # ---- Helper Functions ---- #

@@ -32,11 +32,16 @@ class RateLimitMiddleware:
 
         request = Request(scope)
         
-        # Get identifier (API key or IP address)
+        # Get identifier (API key prefix or IP address)
         api_key = request.headers.get("X-API-Key")
         # client is a tuple of (host, port)
         client_host = scope.get("client", ["", 0])[0]
-        identifier = api_key if api_key else client_host
+        
+        # Use a more stable identifier (prefix for API keys)
+        if api_key:
+            identifier = APIKey.get_key_prefix(api_key)
+        else:
+            identifier = client_host
         
         # Check if this path should bypass rate limit enforcement
         path = scope.get("path", "")
@@ -97,8 +102,11 @@ class RateLimitMiddleware:
         window: int,
     ) -> tuple[bool, int, float]:
         """Check if request is within rate limit."""
+        import hashlib
         redis = redis_client.client
-        key = f"rate_limit:{identifier}"
+        # Use a hash of the identifier for the Redis key for privacy and consistency
+        identifier_hash = hashlib.sha256(identifier.encode()).hexdigest()[:16]
+        key = f"rate_limit:{identifier_hash}"
         now = time.time()
         window_start = now - window
         

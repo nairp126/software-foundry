@@ -34,8 +34,10 @@ async def get_api_key(
     # First check for static master key if configured
     from foundry.config import settings
     if settings.foundry_api_key and api_key == settings.foundry_api_key:
-        # Return a mock APIKey object for the master key
+        import uuid
+        # Return a mock APIKey object for the master key with a sentinel UUID
         return APIKey(
+            id=uuid.UUID(int=0),  # Use a sentinel zero UUID for the master key
             name="Master Key (Static)",
             key_prefix="master",
             is_active=True

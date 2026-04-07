@@ -28,6 +28,28 @@ from foundry.vcs.git_manager import GitManager, CommitType
 from foundry.services.knowledge_graph import KnowledgeGraphService
 from foundry.graph.ingestion import ingestion_pipeline
 from foundry.config import settings
+from foundry.services.agent_control import agent_control_service
+
+
+class AgentControlInterrupt(Exception):
+    """Base exception for agent control interrupts."""
+    def __init__(self, project_id: str, action: str, reason: str = ""):
+        self.project_id = project_id
+        self.action = action
+        self.reason = reason
+        super().__init__(f"Agent execution {action} for project {project_id}: {reason}")
+
+
+class AgentPauseInterrupt(AgentControlInterrupt):
+    """Exception raised when agent execution is paused."""
+    def __init__(self, project_id: str, reason: str = "User requested pause"):
+        super().__init__(project_id, "paused", reason)
+
+
+class AgentCancelInterrupt(AgentControlInterrupt):
+    """Exception raised when agent execution is cancelled."""
+    def __init__(self, project_id: str, reason: str = "User requested cancellation"):
+        super().__init__(project_id, "cancelled", reason)
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +171,7 @@ class AgentOrchestrator:
     async def _pm_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Product Manager agent."""
         project_id = state["project_id"]
+        await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_pm)
         await self._publish_status_update(project_id, ProjectStatus.running_pm, "Starting requirements analysis...")
         
@@ -196,6 +219,7 @@ class AgentOrchestrator:
     async def _architect_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Architect agent."""
         project_id = state["project_id"]
+        await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_architect)
         await self._publish_status_update(project_id, ProjectStatus.running_architect, "Designing system architecture...")
         
@@ -243,6 +267,7 @@ class AgentOrchestrator:
     async def _engineer_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Engineer agent."""
         project_id = state["project_id"]
+        await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_engineer)
         await self._publish_status_update(project_id, ProjectStatus.running_engineer, "Generating codebase...")
         
@@ -347,6 +372,7 @@ class AgentOrchestrator:
     async def _code_review_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Code Review agent."""
         project_id = state["project_id"]
+        await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_code_review)
         await self._publish_status_update(project_id, ProjectStatus.running_code_review, "Analyzing generated code...")
 
@@ -390,6 +416,7 @@ class AgentOrchestrator:
     async def _reflexion_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Reflexion engine (self-healing)."""
         project_id = state["project_id"]
+        await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_reflexion)
         await self._publish_status_update(project_id, ProjectStatus.running_reflexion, "Starting self-healing loop...")
         
@@ -461,6 +488,7 @@ class AgentOrchestrator:
     async def _devops_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for DevOps agent."""
         project_id = state["project_id"]
+        await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_devops)
         await self._publish_status_update(project_id, ProjectStatus.running_devops, "Preparing deployment configuration...")
         
@@ -576,6 +604,41 @@ class AgentOrchestrator:
                 logger.error(f"Failed to update fields for project {project_id}: {e}")
 
     async def _update_project_status(self, project_id: str, status: ProjectStatus):
+        async with AsyncSessionLocal() as session:
+            try:
+                result = await session.execute(
+                    select(Project).where(Project.id == project_id)
+                )
+                project = result.scalar_one_or_none()
+                if project:
+                    project.status = status
+                    project.updated_at = datetime.utcnow()
+                    await session.commit()
+            except Exception as e:
+                await session.rollback()
+                logger.error(f"Failed to update status for project {project_id}: {e}")
+
+    async def _check_control(self, project_id: str):
+        """Check for pending control actions and raise interrupts if needed."""
+        import uuid
+        try:
+            status = await agent_control_service.check_control_status(uuid.UUID(project_id))
+            if not status:
+                return
+            
+            action = status.get("action")
+            reason = status.get("reason", "No reason provided")
+            
+            if action == "pause":
+                logger.info(f"Execution PAUSED for project {project_id}: {reason}")
+                raise AgentPauseInterrupt(project_id, reason)
+            elif action == "cancel":
+                logger.info(f"Execution CANCELLED for project {project_id}: {reason}")
+                raise AgentCancelInterrupt(project_id, reason)
+        except (AgentPauseInterrupt, AgentCancelInterrupt):
+            raise
+        except Exception as e:
+            logger.warning(f"Error checking control status for {project_id}: {e}")
         """Update project status in database."""
         async with AsyncSessionLocal() as session:
             try:
@@ -729,6 +792,17 @@ class AgentOrchestrator:
                 await self._update_project_status(project_id, ProjectStatus.failed)
                 await self._publish_status_update(project_id, ProjectStatus.failed, "Project failed during execution.")
                 logger.warning(f"Project {project_id} ended without reaching successful deployment.")
+            return True
+        except AgentPauseInterrupt as e:
+            # When paused, we don't mark as failed in the graph flow
+            # The API level already set status to PAUSED
+            logger.info(f"Orchestration paused for {project_id}")
+            await self._publish_status_update(project_id, ProjectStatus.paused, f"Execution paused: {e.reason}")
+            return True
+        except AgentCancelInterrupt as e:
+            logger.info(f"Orchestration cancelled for {project_id}")
+            await self._update_project_status(project_id, ProjectStatus.failed)
+            await self._publish_status_update(project_id, ProjectStatus.failed, f"Execution cancelled: {e.reason}")
             return True
         except Exception as e:
             logger.error(f"Orchestrator failed: {e}", exc_info=True)

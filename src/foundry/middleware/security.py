@@ -24,7 +24,7 @@ class SecurityHeadersMiddleware:
                 new_headers = [
                     (b"Strict-Transport-Security", b"max-age=31536000; includeSubDomains"),
                     (b"Content-Security-Policy", 
-                     b"default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+                     b"default-src 'self'; script-src 'self'; "
                      b"style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
                      b"font-src 'self' data:; connect-src 'self' ws: wss:;"),
                     (b"X-Frame-Options", b"DENY"),

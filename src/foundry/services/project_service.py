@@ -291,30 +291,28 @@ class ProjectService:
             f.write("Documentation will be generated here.\n")
 
     def _get_resource_usage(self, project: Project) -> Dict[str, Any]:
-        """Get resource usage for a project.
-        
-        Args:
-            project: Project instance
-            
-        Returns:
-            Dictionary with resource usage metrics
-        """
-        # Placeholder implementation - to be enhanced with actual metrics
-        resource_usage = {
-            "disk_space_mb": 0,
-            "knowledge_graph_nodes": 0,
-            "active_agents": 0,
-        }
-        
-        # Calculate disk space if path exists
+        """Get resource usage for a project with real metrics."""
+        # disk_space_mb calculation
+        total_size = 0
         if project.generated_path and os.path.exists(project.generated_path):
-            total_size = 0
             for dirpath, dirnames, filenames in os.walk(project.generated_path):
                 for filename in filenames:
                     filepath = os.path.join(dirpath, filename)
                     if os.path.exists(filepath):
                         total_size += os.path.getsize(filepath)
-            resource_usage["disk_space_mb"] = round(total_size / (1024 * 1024), 2)
+        
+        resource_usage = {
+            "disk_space_mb": round(total_size / (1024 * 1024), 2),
+            "knowledge_graph_nodes": 0, # To be fetched asynchronously if needed, or via sync proxy
+            "active_agents": 1 if project.status in [
+                ProjectStatus.running_pm, 
+                ProjectStatus.running_architect, 
+                ProjectStatus.running_engineer, 
+                ProjectStatus.running_code_review, 
+                ProjectStatus.running_reflexion, 
+                ProjectStatus.running_devops
+            ] else 0,
+        }
         
         return resource_usage
 
