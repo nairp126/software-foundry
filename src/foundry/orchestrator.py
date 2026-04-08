@@ -198,11 +198,13 @@ class AgentOrchestrator:
         )
         
         response = await self.pm_agent.process_message(message)
-        prd = response.payload.get("prd", "") if response else ""
+        prd = response.payload.get("prd") if response and isinstance(response.payload, dict) else None
         
+        # Parse PRD if it's a JSON string
+        prd = self._parse_json_field(prd)
         # Save PRD to project model
         await self._update_project_fields(state["project_id"], {"prd": prd})
-        
+    
         # Store PRD artifact
         if prd:
             await self._store_artifact(
@@ -246,11 +248,14 @@ class AgentOrchestrator:
         )
         
         response = await self.architect_agent.process_message(message)
-        architecture = response.payload.get("architecture", "") if response else ""
+        architecture = response.payload.get("architecture") if response and isinstance(response.payload, dict) else None
         
-        # Save architecture to project model
-        await self._update_project_fields(project_id, {"architecture": architecture})
+        # Parse Architecture if it's a JSON string
+        architecture = self._parse_json_field(architecture)
         
+        # Save Architecture to project model
+        await self._update_project_fields(state["project_id"], {"architecture": architecture})
+    
         # Store Architecture artifact
         if architecture:
             await self._store_artifact(
@@ -398,11 +403,14 @@ class AgentOrchestrator:
         )
 
         response = await self.code_review_agent.process_message(message)
-        review_results = response.payload if response else {"status": "REJECTED", "feedback": "Review failed"}
+        review_results = response.payload if response else None
+        review_results = self._parse_json_field(review_results)
+        
+        if not isinstance(review_results, dict):
+            review_results = {"status": "REJECTED", "feedback": "Invalid review format", "approved": False}
 
         is_approved = review_results.get("status") == "APPROVED"
         review_results["approved"] = is_approved
-
         # Save code review to project model
         await self._update_project_fields(state["project_id"], {"code_review": review_results})
         
@@ -417,6 +425,7 @@ class AgentOrchestrator:
 
         return {
             "messages": [AIMessage(content=f"Code review completed. Status: {review_results.get('status')}")],
+            "project_context": {**state["project_context"]},
             "review_feedback": review_results
         }
 
@@ -597,8 +606,8 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.error(f"Failed to create ApprovalRequest: {e}")
 
-        await self._update_project_status(project_id, ProjectStatus.pending_approval)
-        await self._publish_status_update(project_id, ProjectStatus.pending_approval, "Architectural design pending review.")
+        await self._update_project_status(project_id, ProjectStatus.paused)
+        await self._publish_status_update(project_id, ProjectStatus.paused, "Architectural design pending review.")
         
         return {
             "messages": [AIMessage(content="Waiting for architectural approval...")],
@@ -639,8 +648,15 @@ class AgentOrchestrator:
                 logger.error(f"Error checking approval status: {e}")
                 return "wait"
 
+    # JSONB column names that must always be stored as dicts, never strings
+    _JSONB_FIELDS = {"prd", "architecture", "code_review"}
+
     async def _update_project_fields(self, project_id: str, fields: Dict[str, Any]):
-        """Update multiple fields on a project record."""
+        """Update multiple fields on a project record.
+        
+        Automatically parses JSON strings for JSONB columns to prevent
+        Pydantic ValidationErrors when the API reads them back.
+        """
         async with AsyncSessionLocal() as session:
             try:
                 result = await session.execute(
@@ -649,6 +665,9 @@ class AgentOrchestrator:
                 project = result.scalar_one_or_none()
                 if project:
                     for key, value in fields.items():
+                        # Auto-parse JSON strings for JSONB columns
+                        if key in self._JSONB_FIELDS and isinstance(value, str):
+                            value = self._parse_json_field(value)
                         setattr(project, key, value)
                     await session.commit()
             except Exception as e:
@@ -732,6 +751,22 @@ class AgentOrchestrator:
                 await session.rollback()
                 logger.error(f"Failed to log agent execution: {e}")
 
+    def _parse_json_field(self, field_value: Any) -> Any:
+        """Safely parse a field into a dictionary if it is a JSON string."""
+        if not field_value:
+            return None
+        if isinstance(field_value, str):
+            try:
+                # Basic cleaning of markdown backticks if present
+                cleaned = field_value.replace("```json", "").replace("```", "").strip()
+                if not cleaned:
+                    return None
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse JSON field: {field_value[:100]}...")
+                return None
+        return field_value
+
     async def _store_artifact(self, project_id: str, name: str, content: str, artifact_type: ArtifactType, language: str = "python"):
         """Store generated artifact in database and filesystem."""
         # Save to filesystem
@@ -744,8 +779,14 @@ class AgentOrchestrator:
         if dir_part:
             os.makedirs(dir_part, exist_ok=True)
         
+        # Handle non-string content (e.g., dicts from structured responses)
+        if isinstance(content, (dict, list)):
+            content = json.dumps(content, indent=2)
+        elif content is None:
+            content = ""
+
         # CLEANING: Strip markdown backticks for code files
-        if artifact_type == ArtifactType.code:
+        if artifact_type == ArtifactType.code and isinstance(content, str):
             content = content.replace("```python", "").replace("```javascript", "").replace("```js", "").replace("```", "").strip()
 
             # Use the actual project language (Fix ORCH-1b)
@@ -843,7 +884,9 @@ class AgentOrchestrator:
             final_state = initial_state
             last_yield_time = float(datetime.utcnow().timestamp())
             
+            logger.critical(f"STARTING GRAPH ASTREAM FOR PROJECT {project_id}")
             async for output in self.graph.astream(initial_state, config):
+                logger.critical(f"ASTREAM YIELDED: {output.keys() if isinstance(output, dict) else output}")
                 current_time = float(datetime.utcnow().timestamp())
                 for key, value in output.items():
                     logger.debug(f"Graph node {key} finished")
@@ -856,15 +899,23 @@ class AgentOrchestrator:
                         
                     final_state = {**final_state, **value}
                 last_yield_time = current_time
-                    
+                
+            logger.critical(f"GRAPH ASTREAM COMPLETED. FINAL STATE SUCCESS FLAG: {final_state.get('success_flag')}")
             if final_state.get("success_flag"):
                 await self._update_project_status(project_id, ProjectStatus.completed)
                 await self._publish_status_update(project_id, ProjectStatus.completed, "Generation and deployment successful.")
                 logger.info(f"Project {project_id} completed successfully.")
             else:
-                await self._update_project_status(project_id, ProjectStatus.failed)
-                await self._publish_status_update(project_id, ProjectStatus.failed, "Project failed during execution.")
-                logger.warning(f"Project {project_id} ended without reaching successful deployment.")
+                # Check if we naturally paused for approval, if so, do not fail
+                async with AsyncSessionLocal() as session:
+                    res = await session.execute(select(Project).where(Project.id == project_id))
+                    p = res.scalar_one_or_none()
+                    if p and p.status == ProjectStatus.paused:
+                        logger.info(f"Project {project_id} is paused for approval, correctly suspending stream.")
+                    else:
+                        await self._update_project_status(project_id, ProjectStatus.failed)
+                        await self._publish_status_update(project_id, ProjectStatus.failed, "Project failed during execution.")
+                        logger.warning(f"Project {project_id} ended without reaching successful deployment. Final State keys: {final_state.keys()}")
             return True
         except AgentPauseInterrupt as e:
             # When paused, we don't mark as failed in the graph flow

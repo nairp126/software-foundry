@@ -388,7 +388,9 @@ class ReflexionEngine(Agent):
         """
         Execute code and automatically fix errors with retry logic.
         """
-        if isinstance(code_repo, str):
+        if code_repo is None:
+            code_repo = {}
+        elif isinstance(code_repo, str):
             code_repo = {entry_point: code_repo}
 
         attempt = 0

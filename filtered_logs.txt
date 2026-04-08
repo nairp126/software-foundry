@@ -1,0 +1,10 @@
+12: Orchestrator failed: pending_approval
+13: Traceback (most recent call last):
+180: Orchestrator failed: pending_approval
+181: Traceback (most recent call last):
+228: INFO:     172.18.0.1:36526 - "GET /projects/1b69ca1a-f651-4037-a2fd-b2e41e2e34b9 HTTP/1.1" 200 OK
+230: INFO:     172.18.0.1:60264 - "GET /projects/1b69ca1a-f651-4037-a2fd-b2e41e2e34b9 HTTP/1.1" 200 OK
+232: Project 1b69ca1a-f651-4037-a2fd-b2e41e2e34b9 ended without reaching successful deployment.
+233: INFO:     172.18.0.1:45242 - "GET /projects/1b69ca1a-f651-4037-a2fd-b2e41e2e34b9 HTTP/1.1" 200 OK
+234: INFO:     172.18.0.1:45244 - "GET /projects/1b69ca1a-f651-4037-a2fd-b2e41e2e34b9 HTTP/1.1" 200 OK
+235: INFO:     172.18.0.1:45250 - "GET /projects/1b69ca1a-f651-4037-a2fd-b2e41e2e34b9/artifacts HTTP/1.1" 200 OK

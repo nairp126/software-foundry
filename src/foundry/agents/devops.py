@@ -88,13 +88,16 @@ class DevOpsAgent(Agent):
         3. `.dockerignore`: To exclude venv, node_modules, .git, etc.
         4. `.env.example`: Template for environment variables.
 
-        Return ONLY a JSON object:
+        Return ONLY a JSON object. 
+        IMPORTANT: All internal double quotes (e.g., in Docker CMD or ENTRYPOINT) MUST be escaped with a backslash (\\\").
+        
+        Example Output:
         {{
-            "Dockerfile": "...",
-            "docker-compose.yml": "...",
-            ".dockerignore": "...",
-            ".env.example": "...",
-            "explanation": "Summary of deployment strategy"
+            \"Dockerfile\": \"FROM python:3.11\\nCMD [\\\"python\\\", \\\"app.py\\\"]\",
+            \"docker-compose.yml\": \"...\",
+            \".dockerignore\": \"...\",
+            \".env.example\": \"...\",
+            \"explanation\": \"...\"
         }}
         """
 
@@ -107,36 +110,59 @@ class DevOpsAgent(Agent):
         {deps_content}
         """
 
-        messages = [
-            LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=user_prompt)
-        ]
+        max_retries = 2
+        attempt_num = 0
+        deployment_data = {}
+        
+        while attempt_num < max_retries:
+            attempt_num += 1
+            messages = [
+                LLMMessage(role="system", content=system_prompt),
+                LLMMessage(role="user", content=user_prompt)
+            ]
+            
+            if attempt_num > 1:
+                messages.append(LLMMessage(
+                    role="user", 
+                    content="CRITICAL: Your previous response was not valid JSON. Return ONLY the requested JSON object without any preamble or markdown code blocks backticks."
+                ))
 
-        # Low temp for JSON stability
-        response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
-
-        # Robust JSON Parsing (BUG-DEV-2)
-        try:
-            content = response.content
-            if "```" in content:
-                content = re.sub(r'```[a-z]*\n|```', '', content).strip()
-            # Handle list-of-dicts or direct dict
-            if isinstance(content, str):
-                deployment_data = json.loads(content)
-            else:
-                deployment_data = content
+            response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
+            
+            # Robust JSON Parsing (BUG-DEV-2)
+            try:
+                content = response.content
+                if not content:
+                    raise ValueError("Empty response from LLM")
+                    
+                if "```" in content:
+                    content = re.sub(r'```[a-z]*\n|```', '', content).strip()
                 
-            logger.info(f"DevOpsAgent successfully generated {len(deployment_data.keys())} files.")
-        except Exception as e:
-            logger.error(f"DevOps Agent failed to parse deployment JSON: {e}")
-            deployment_data = {
-                "error": "Failed to generate deployment config",
-                "raw_response": response.content[:500]
-            }
+                if isinstance(content, str):
+                    deployment_data = json.loads(content)
+                else:
+                    deployment_data = content
+                    
+                logger.info(f"DevOpsAgent successfully generated {len(deployment_data.keys())} files on attempt {attempt_num}.")
+                break # Success
+            except json.JSONDecodeError as je:
+                logger.error(f"DevOps Agent JSON syntax error on attempt {attempt_num} at line {je.lineno} col {je.colno}: {je.msg}")
+                if attempt_num == max_retries:
+                    deployment_data = {
+                        "error": f"JSON syntax error: {str(je)}",
+                        "raw_response": response.content[:1000] if response else "No response"
+                    }
+            except Exception as e:
+                logger.error(f"DevOps Agent failed to parse deployment JSON on attempt {attempt_num}: {e}")
+                if attempt_num == max_retries:
+                    deployment_data = {
+                        "error": f"General parsing failure: {str(e)}",
+                        "raw_response": response.content[:1000] if response else "No response"
+                    }
 
         return AgentMessage(
             sender=self.agent_type,
-            recipient=AgentType.ORCHESTRATOR, # Corrected recipient (HIGH-DEV-2)
+            recipient=AgentType.ORCHESTRATOR,
             message_type=MessageType.TASK,
             payload=deployment_data,
         )

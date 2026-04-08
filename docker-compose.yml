@@ -16,6 +16,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   redis:
     image: redis:7-alpine
@@ -29,6 +33,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   neo4j:
     image: neo4j:5.16-community
@@ -36,6 +44,10 @@ services:
     environment:
       NEO4J_AUTH: neo4j/neo4j_password
       NEO4J_PLUGINS: '["apoc"]'
+      # Corrected settings for Neo4j 5.x
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
       NEO4J_dbms_security_procedures_allowlist: "apoc.*"
     ports:
@@ -43,11 +55,16 @@ services:
       - "7687:7687"
     volumes:
       - neo4j_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 2G
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
       interval: 10s
-      timeout: 5s
-      retries: 10
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   api:
     build: .

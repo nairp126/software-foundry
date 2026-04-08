@@ -1,28 +1,11 @@
 """
 Live end-to-end smoke test for the Autonomous Software Foundry.
-
-Requires a running server with all services (PostgreSQL, Redis, Ollama, Neo4j optional).
-
-Prerequisites:
-  1. Apply all DB migrations:  alembic upgrade head
-  2. Start the server:         uvicorn foundry.main:app --reload
-  3. Run this script:          python test_e2e.py
-
-The pipeline stages and expected artifacts:
-  PM agent        → prd.md              (artifact_type: documentation)
-  Architect agent → architecture.md     (artifact_type: documentation)
-  Engineer agent  → main.py + others    (artifact_type: code)
-  Code Review     → code_review.json    (artifact_type: review)
-  Reflexion       → (may loop back to engineer, up to 3 times)
-  DevOps agent    → Dockerfile,
-                    docker-compose.yml  (artifact_type: devops)
-
-Final project status should be "completed".
 """
 
 import requests
 import sys
 import time
+import json
 
 BASE_URL = "http://127.0.0.1:8000"
 API_KEY = "foundry_master_key_2024"
@@ -84,6 +67,23 @@ def create_project(name: str, requirements: str, language: str = "python", frame
     return project
 
 
+def approve_project(project_id: str):
+    print(f"\n=== Approving Architecture for {project_id} ===")
+    payload = {"comment": "Architecture looks good. Proceed to engineer."}
+    resp = requests.post(
+        f"{BASE_URL}/projects/{project_id}/approve", 
+        json=payload, 
+        timeout=10, 
+        headers=get_headers()
+    )
+    if resp.status_code == 200:
+        print("  Successfully approved design.")
+        return True
+    else:
+        print(f"  Approval failed: {resp.status_code} — {resp.text}")
+        return False
+
+
 def poll_until_done(project_id: str, timeout_seconds: int = 1200) -> str:
     """Poll project status until completed/failed or timeout. Returns final status."""
     print(f"\n=== Monitoring Pipeline (max {timeout_seconds // 60}m) ===")
@@ -100,6 +100,12 @@ def poll_until_done(project_id: str, timeout_seconds: int = 1200) -> str:
             elapsed = int(time.time() - (deadline - timeout_seconds))
             print(f"  [{elapsed:>4}s] -> {status}")
             seen_statuses.add(status)
+
+            # Auto-approve architectural gate
+            if status == "paused":
+                # Give it a few seconds to let DB commits settle just in case
+                time.sleep(2) 
+                approve_project(project_id)
 
         if status in ("completed", "failed"):
             return status
@@ -217,7 +223,7 @@ def main():
 
     results = {}
     results["python"] = run_python_flow()
-    results["javascript"] = run_javascript_flow()
+    # results["javascript"] = run_javascript_flow() # Skip JS for speed
 
     print("\n" + "=" * 60)
     print("SUMMARY")

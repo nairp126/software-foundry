@@ -308,15 +308,27 @@ async def get_project(
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    # Safety net: parse JSONB fields that may have been stored as strings
+    def _safe_jsonb(val):
+        if isinstance(val, str):
+            try:
+                import json as _json
+                cleaned = val.replace("```json", "").replace("```", "").strip()
+                return _json.loads(cleaned) if cleaned else None
+            except (ValueError, TypeError):
+                return None
+        return val
+
     return ProjectResponse(
         id=project.id,
         name=project.name,
         description=project.description,
         requirements=project.requirements,
         status=project.status.value,
-        prd=project.prd,
-        architecture=project.architecture,
-        code_review=project.code_review,
+        prd=_safe_jsonb(project.prd),
+        architecture=_safe_jsonb(project.architecture),
+        code_review=_safe_jsonb(project.code_review),
         generated_path=project.generated_path,
         created_at=project.created_at,
         updated_at=project.updated_at,
