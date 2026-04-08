@@ -616,7 +616,7 @@ class ReflexionEngine(Agent):
                 )
                 kg_context = f"\n\nKNOWLEDGE GRAPH ARCHITECTURAL CONTEXT:\n{self.kg_tools.format_for_llm(context_data)}\n"
             except Exception as e:
-                print(f"KG Context retrieval failed: {e}")
+                logger.error(f"KG Context retrieval failed: {e}")
 
         messages = [
             LLMMessage(role="system", content=system_prompt),

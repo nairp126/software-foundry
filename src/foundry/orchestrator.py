@@ -74,6 +74,7 @@ class GraphState(TypedDict):
     success_flag: bool  # tracks if the code was successfully deployed
     language: str  # project language, e.g. "python", "javascript", "java"
     framework: str  # project framework, e.g. "fastapi", "express", "spring"
+    resume_from: Optional[str]  # Optional node to resume from
 
 
 class AgentOrchestrator:
@@ -97,6 +98,12 @@ class AgentOrchestrator:
         self._checkpointer = MemorySaver()
         self.graph = self._build_graph()
 
+    def _route_entry(self, state: GraphState) -> str:
+        """Determines the start node of the graph."""
+        if state.get("resume_from"):
+            return state["resume_from"]
+        return "product_manager"
+
     def _build_graph(self) -> StateGraph:
         """Construct the LangGraph workflow."""
         workflow = StateGraph(GraphState)
@@ -111,7 +118,7 @@ class AgentOrchestrator:
         workflow.add_node("devops", self._devops_node)
 
         # Define edges
-        workflow.add_edge(START, "product_manager")
+        workflow.add_conditional_edges(START, self._route_entry)
         workflow.add_edge("product_manager", "architect")
         
         # Approval gate after architecture (Audit 7.2)
@@ -566,6 +573,30 @@ class AgentOrchestrator:
             if project and project.status == ProjectStatus.running_engineer:
                 return {"messages": [AIMessage(content="Design already approved. Skipping node.")]}
 
+        # Create ApprovalRequest
+        from foundry.models.approval import ApprovalRequest, ApprovalType, ApprovalStatus
+        import uuid
+        async with AsyncSessionLocal() as session:
+            try:
+                result = await session.execute(
+                    select(ApprovalRequest).where(
+                        ApprovalRequest.project_id == uuid.UUID(project_id),
+                        ApprovalRequest.status == ApprovalStatus.pending
+                    )
+                )
+                if not result.scalar_one_or_none():
+                    approval = ApprovalRequest(
+                        project_id=uuid.UUID(project_id),
+                        request_type=ApprovalType.plan,
+                        stage="architecture",
+                        status=ApprovalStatus.pending,
+                        content={"architecture": state["project_context"].get("architecture", "")}
+                    )
+                    session.add(approval)
+                    await session.commit()
+            except Exception as e:
+                logger.error(f"Failed to create ApprovalRequest: {e}")
+
         await self._update_project_status(project_id, ProjectStatus.pending_approval)
         await self._publish_status_update(project_id, ProjectStatus.pending_approval, "Architectural design pending review.")
         
@@ -582,10 +613,31 @@ class AgentOrchestrator:
 
     async def _check_approval_status(self, state: GraphState) -> str:
         """Check if the user has approved the design."""
-        # This would normally check a 'Project' records flag in the DB.
-        # For the autonomous flow, we'll auto-proceed if policy isn't STRICT.
-        # Returning END here simulates a wait state.
-        return "proceed"
+        project_id = state["project_id"]
+        from foundry.models.approval import ApprovalRequest, ApprovalStatus
+        import uuid
+        
+        async with AsyncSessionLocal() as session:
+            try:
+                result = await session.execute(
+                    select(ApprovalRequest).where(
+                        ApprovalRequest.project_id == uuid.UUID(project_id),
+                        ApprovalRequest.stage == "architecture"
+                    ).order_by(ApprovalRequest.created_at.desc())
+                )
+                approval = result.scalar_one_or_none()
+                
+                if not approval:
+                    return "proceed"
+                
+                if approval.status == ApprovalStatus.approved:
+                    return "proceed"
+                
+                # If pending or rejected, exit the graph
+                return "wait"
+            except Exception as e:
+                logger.error(f"Error checking approval status: {e}")
+                return "wait"
 
     async def _update_project_fields(self, project_id: str, fields: Dict[str, Any]):
         """Update multiple fields on a project record."""
@@ -743,11 +795,14 @@ class AgentOrchestrator:
                 logger.error(f"Failed to store artifact record: {e}")
                 await session.rollback()
 
-    async def run(self, project_id: str, initial_prompt: str):
+    async def run(self, project_id: str, initial_prompt: str, resume_from: Optional[str] = None):
         """Run the orchestration graph for a project."""
-        # Read language and framework from the project record
+        # Read lang, framework, prd, arch from the project record
         project_language = "python"
         project_framework = ""
+        project_prd = ""
+        project_architecture = ""
+        
         async with AsyncSessionLocal() as session:
             try:
                 result = await session.execute(
@@ -757,19 +812,28 @@ class AgentOrchestrator:
                 if project:
                     project_language = getattr(project, "language", "python") or "python"
                     project_framework = getattr(project, "framework", "") or ""
+                    project_prd = getattr(project, "prd", "") or ""
+                    project_architecture = getattr(project, "architecture", "") or ""
             except Exception as e:
-                logger.warning(f"Could not read project language/framework: {e}")
+                logger.warning(f"Could not read project data: {e}")
 
+        # Ensure we have a mock prompt if resuming without one
+        safe_prompt = initial_prompt if initial_prompt else "Resume execution"
+        
         initial_state = {
-            "messages": [HumanMessage(content=initial_prompt)],
+            "messages": [HumanMessage(content=safe_prompt)],
             "current_agent": "product_manager",
-            "project_context": {},
+            "project_context": {
+                "prd": project_prd,
+                "architecture": project_architecture
+            },
             "review_feedback": {},
             "project_id": project_id,
             "reflexion_count": 0,
             "success_flag": False,
             "language": project_language,
             "framework": project_framework,
+            "resume_from": resume_from
         }
         
         # Use project_id as thread_id for LangGraph checkpointer
@@ -777,12 +841,21 @@ class AgentOrchestrator:
         
         try:
             final_state = initial_state
+            last_yield_time = float(datetime.utcnow().timestamp())
+            
             async for output in self.graph.astream(initial_state, config):
-                # We can emit logs or events here for real-time tracking
+                current_time = float(datetime.utcnow().timestamp())
                 for key, value in output.items():
                     logger.debug(f"Graph node {key} finished")
-                    # Update final_state with the latest values from the node output
+                    duration = float(current_time - last_yield_time)
+                    
+                    try:
+                        await self._log_execution(project_id, key, "COMPLETED", last_yield_time, duration)
+                    except Exception as e:
+                        logger.warning(f"Failed to log execution: {e}")
+                        
                     final_state = {**final_state, **value}
+                last_yield_time = current_time
                     
             if final_state.get("success_flag"):
                 await self._update_project_status(project_id, ProjectStatus.completed)

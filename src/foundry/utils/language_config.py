@@ -13,7 +13,6 @@ class LanguageConfig:
     base_image: str
     coding_standard: str
     web_frameworks: List[str]
-    forbidden_patterns: List[str] = field(default_factory=list)
 
 LANGUAGE_CONFIGS: Dict[str, LanguageConfig] = {
     "python": LanguageConfig(
@@ -26,8 +25,7 @@ LANGUAGE_CONFIGS: Dict[str, LanguageConfig] = {
         test_framework="pytest",
         base_image="python:3.11-slim",
         coding_standard="PEP 8",
-        web_frameworks=["FastAPI", "Flask", "Django"],
-        forbidden_patterns=[r"console\.log", r"require\(", r"import .* from"]
+        web_frameworks=["FastAPI", "Flask", "Django"]
     ),
     "javascript": LanguageConfig(
         name="javascript",
@@ -39,8 +37,7 @@ LANGUAGE_CONFIGS: Dict[str, LanguageConfig] = {
         test_framework="jest",
         base_image="node:20-alpine",
         coding_standard="Airbnb/Standard",
-        web_frameworks=["Express", "React", "Next.js"],
-        forbidden_patterns=[r"def ", r"import .* as "]
+        web_frameworks=["Express", "React", "Next.js"]
     ),
     "typescript": LanguageConfig(
         name="typescript",
@@ -52,8 +49,7 @@ LANGUAGE_CONFIGS: Dict[str, LanguageConfig] = {
         test_framework="jest",
         base_image="node:20-alpine",
         coding_standard="Airbnb/Standard",
-        web_frameworks=["Express", "React", "Next.js", "NestJS"],
-        forbidden_patterns=[r"def ", r"import .* as "]
+        web_frameworks=["Express", "React", "Next.js", "NestJS"]
     ),
     "java": LanguageConfig(
         name="java",
@@ -65,8 +61,7 @@ LANGUAGE_CONFIGS: Dict[str, LanguageConfig] = {
         test_framework="JUnit",
         base_image="eclipse-temurin:21-jre-alpine",
         coding_standard="Google Java Style",
-        web_frameworks=["Spring Boot", "Micronaut"],
-        forbidden_patterns=[r"def ", r"function "]
+        web_frameworks=["Spring Boot", "Micronaut"]
     )
 }
 

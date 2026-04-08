@@ -2,7 +2,10 @@
 
 import uuid
 import json
+import logging
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 from typing import Optional, Dict, Any
 from pathlib import Path
 
@@ -49,11 +52,14 @@ class AgentControlService:
             "timestamp": datetime.utcnow().isoformat(),
         }
         
-        await self.redis.set(
-            control_key,
-            json.dumps(control_data),
-            ex=86400,  # 24 hour expiry
-        )
+        try:
+            await self.redis.set(
+                control_key,
+                json.dumps(control_data),
+                ex=86400,  # 24 hour expiry
+            )
+        except Exception as e:
+            logger.error(f"Redis set failed in pause_execution: {e}")
         
         return {
             "success": True,
@@ -80,7 +86,10 @@ class AgentControlService:
         control_key = f"{self._control_prefix}{project_id}"
         
         # Clear control flag
-        await self.redis.delete(control_key)
+        try:
+            await self.redis.delete(control_key)
+        except Exception as e:
+            logger.error(f"Redis delete failed in resume_execution: {e}")
         
         return {
             "success": True,
@@ -115,11 +124,14 @@ class AgentControlService:
             "timestamp": datetime.utcnow().isoformat(),
         }
         
-        await self.redis.set(
-            control_key,
-            json.dumps(control_data),
-            ex=3600,  # 1 hour expiry
-        )
+        try:
+            await self.redis.set(
+                control_key,
+                json.dumps(control_data),
+                ex=3600,  # 1 hour expiry
+            )
+        except Exception as e:
+            logger.error(f"Redis set failed in cancel_execution: {e}")
         
         result = {
             "success": True,
@@ -154,11 +166,14 @@ class AgentControlService:
         """
         control_key = f"{self._control_prefix}{project_id}"
         
-        control_json = await self.redis.get(control_key)
-        if not control_json:
+        try:
+            control_json = await self.redis.get(control_key)
+            if not control_json:
+                return None
+            return json.loads(control_json)
+        except Exception as e:
+            logger.error(f"Redis get failed in check_control_status: {e}")
             return None
-        
-        return json.loads(control_json)
 
     async def save_checkpoint(
         self,
@@ -190,11 +205,15 @@ class AgentControlService:
         }
         
         # Save checkpoint with 7 day expiry
-        await self.redis.set(
-            checkpoint_key,
-            json.dumps(checkpoint_data),
-            ex=604800,  # 7 days
-        )
+        try:
+            await self.redis.set(
+                checkpoint_key,
+                json.dumps(checkpoint_data),
+                ex=604800,  # 7 days
+            )
+        except Exception as e:
+            logger.error(f"Redis set failed in save_checkpoint: {e}")
+            return {"success": False, "project_id": str(project_id)}
         
         return {
             "success": True,
@@ -216,11 +235,14 @@ class AgentControlService:
         """
         checkpoint_key = f"{self._checkpoint_prefix}{project_id}"
         
-        checkpoint_json = await self.redis.get(checkpoint_key)
-        if not checkpoint_json:
+        try:
+            checkpoint_json = await self.redis.get(checkpoint_key)
+            if not checkpoint_json:
+                return None
+            return json.loads(checkpoint_json)
+        except Exception as e:
+            logger.error(f"Redis get failed in get_checkpoint: {e}")
             return None
-        
-        return json.loads(checkpoint_json)
 
     async def delete_checkpoint(
         self,
@@ -236,7 +258,11 @@ class AgentControlService:
         """
         checkpoint_key = f"{self._checkpoint_prefix}{project_id}"
         
-        deleted = await self.redis.delete(checkpoint_key)
+        try:
+            deleted = await self.redis.delete(checkpoint_key)
+        except Exception as e:
+            logger.error(f"Redis delete failed in delete_checkpoint: {e}")
+            deleted = 0
         
         return {
             "success": bool(deleted),

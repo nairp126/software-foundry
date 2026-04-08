@@ -325,9 +325,31 @@ class ProjectService:
         Returns:
             Estimated monthly cost in USD
         """
-        # Placeholder implementation - to be enhanced with actual cost tracking
-        # For MVP, return 0.0 since cloud resources aren't deployed yet
-        return 0.0
+        # Heuristic estimation since real CDK calculation is pending
+        base_cost = 5.0  # Base cost for minimal web hosting (e.g., small EC2/ECS or Lambda + API Gateway)
+        
+        reqs = (project.requirements or "").lower()
+        arch = ""
+        # architecture can be text or dict depending on JSONB structure
+        if project.architecture:
+            if isinstance(project.architecture, str):
+                arch = project.architecture.lower()
+            elif isinstance(project.architecture, dict):
+                arch = str(project.architecture).lower()
+                
+        combined = reqs + " " + arch
+        
+        cost = base_cost
+        if any(kw in combined for kw in ["database", "postgres", "mysql", "rds", "sql"]):
+            cost += 15.0  # basic RDS/managed DB instance
+        if any(kw in combined for kw in ["redis", "cache", "memcached", "elasticache"]):
+            cost += 10.0  # managed cache node
+        if any(kw in combined for kw in ["load balancer", "alb", "nlb", "api gateway"]):
+            cost += 20.0  # provisioned gateway/balancer
+        if any(kw in combined for kw in ["s3", "storage", "blob", "bucket"]):
+            cost += 2.5   # generous S3 usage
+            
+        return cost
 
     async def _destroy_cloud_resources(self, project: Project) -> Dict[str, Any]:
         """Destroy cloud resources using CDK.

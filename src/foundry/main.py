@@ -190,14 +190,15 @@ async def general_exception_handler(request: Request, exc: Exception):
 #  Background runner
 # ------------------------------------------------------------------ #
 
-async def _run_project_background(project_id: str, requirements: str, language: str = "python", framework: Optional[str] = None) -> None:
+async def _run_project_background(project_id: str, requirements: str, language: str = "python", framework: Optional[str] = None, resume_from: Optional[str] = None) -> None:
     """Background task that drives the orchestrator pipeline."""
     try:
         # Fix K: Instantiate fresh orchestrator for every project to avoid memory contamination
         orchestrator = AgentOrchestrator()
         await orchestrator.run(
             project_id=str(project_id), 
-            initial_prompt=requirements
+            initial_prompt=requirements,
+            resume_from=resume_from
         )
     except Exception as exc:
         logger.error(f"Project {project_id} failed: {exc}")
@@ -403,6 +404,7 @@ async def get_approval_status(
 async def approve_project(
     project_id: UUID, 
     decision: ApprovalDecision, 
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     api_key: APIKey = Depends(require_api_key),
 ):
@@ -424,6 +426,21 @@ async def approve_project(
     approval.reviewer_comment = decision.comment
     await db.commit()
     await db.refresh(approval)
+
+    try:
+        project_result = await db.execute(select(Project).where(Project.id == project_id))
+        project = project_result.scalar_one_or_none()
+        if project:
+            background_tasks.add_task(
+                _run_project_background,
+                str(project_id),
+                project.requirements,
+                language=project.language,
+                framework=project.framework,
+                resume_from="engineer"
+            )
+    except Exception as e:
+        logger.error(f"Failed to resume project after approval: {e}")
 
     return ApprovalResponse(
         id=approval.id,

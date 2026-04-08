@@ -140,10 +140,10 @@ def recover_prompt(
     from foundry.utils.language_config import get_language_config
 
     config = get_language_config(target_language)
-    lang_name = config["name"]
-    extension = config["extension"]
-    framework = config["web_framework"]
-    standard = config["coding_standard"]
+    lang_name = config.name
+    extension = config.extensions[0] if config.extensions else ""
+    framework = config.web_frameworks[0] if config.web_frameworks else ""
+    standard = config.coding_standard
 
     return (
         f"CRITICAL CORRECTION REQUIRED\n"

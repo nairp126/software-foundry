@@ -4,6 +4,8 @@ from typing import Optional
 from foundry.llm.base import BaseLLMProvider
 from foundry.llm.vllm_provider import VLLMProvider
 from foundry.llm.ollama_provider import OllamaProvider
+from foundry.llm.openai_provider import OpenAIProvider
+from foundry.llm.anthropic_provider import AnthropicProvider
 from foundry.config import settings
 
 
@@ -36,11 +38,9 @@ class LLMProviderFactory:
         elif provider == "vllm":
             return VLLMProvider(model_name=model_name, **kwargs)
         elif provider == "openai":
-            # TODO: Implement OpenAI provider
-            raise NotImplementedError("OpenAI provider not yet implemented")
+            return OpenAIProvider(model_name=model_name, **kwargs)
         elif provider == "anthropic":
-            # TODO: Implement Anthropic provider
-            raise NotImplementedError("Anthropic provider not yet implemented")
+            return AnthropicProvider(model_name=model_name, **kwargs)
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
     
