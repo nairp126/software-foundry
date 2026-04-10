@@ -301,6 +301,95 @@ class IngestionPipeline:
             self.logger.error(error_msg)
             stats["error"] = str(e)
             return stats
+
+    async def ingest_source(
+        self,
+        project_id: str,
+        file_path: str,
+        code: str
+    ) -> Dict[str, Any]:
+        """Ingest a source code string into the Knowledge Graph."""
+        self.logger.info(f"Ingesting source for: {file_path}")
+        
+        stats = {
+            "functions_created": 0,
+            "classes_created": 0,
+            "success": False,
+            "error": None
+        }
+        
+        try:
+            # Parse the source string
+            module = self.parser.parse_source(code, file_path)
+            if not module:
+                stats["error"] = "Failed to parse source code"
+                return stats
+            
+            # Create module node
+            module_id = str(uuid4())
+            await self.kg_service.store_module(
+                project_id=project_id,
+                module_id=module_id,
+                file_path=file_path,
+                imports=[imp.module for imp in module.imports],
+                exports=[func.name for func in module.functions] + 
+                        [cls.name for cls in module.classes]
+            )
+
+            # Create component node
+            component_id = str(uuid4())
+            await self.kg_service.store_component(
+                project_id=project_id,
+                component_id=component_id,
+                name=Path(file_path).stem,
+                component_type="module",
+                file_path=file_path,
+                metadata={
+                    "docstring": module.docstring,
+                    "global_variables": module.global_variables
+                }
+            )
+            
+            # Create function nodes
+            for func in module.functions:
+                function_id = str(uuid4())
+                await self.kg_service.store_function(
+                    project_id=project_id,
+                    function_id=function_id,
+                    name=func.name,
+                    signature=func.signature,
+                    file_path=file_path,
+                    line_number=func.line_number,
+                    complexity=func.complexity,
+                    parent_component_id=component_id,
+                    content=func.content
+                )
+                stats["functions_created"] += 1
+            
+            # Create class nodes
+            for cls in module.classes:
+                class_id = str(uuid4())
+                await self.kg_service.store_class(
+                    project_id=project_id,
+                    class_id=class_id,
+                    name=cls.name,
+                    file_path=file_path,
+                    line_number=cls.line_number,
+                    methods=cls.methods,
+                    base_classes=cls.base_classes,
+                    parent_component_id=component_id,
+                    content=cls.content
+                )
+                stats["classes_created"] += 1
+            
+            stats["success"] = True
+            return stats
+        
+        except Exception as e:
+            error_msg = f"Error ingesting source for {file_path}: {e}"
+            self.logger.error(error_msg)
+            stats["error"] = str(e)
+            return stats
     
     async def update_relationships(
         self,

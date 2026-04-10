@@ -365,7 +365,7 @@ class KnowledgeGraphTools:
         """Return all ArchitectureDecision nodes for a project. Never raises."""
         try:
             query = """
-            MATCH (a:ArchitectureDecision {id: $project_id})
+            MATCH (a:ArchitectureDecision {project_id: $project_id})
             RETURN a.id as id, a.title as title, a.decision as decision,
                    a.rationale as rationale, a.language as language,
                    a.framework as framework
@@ -388,7 +388,7 @@ class KnowledgeGraphTools:
         try:
             # Fetch ADRs
             adr_query = """
-            MATCH (a:ArchitectureDecision {id: $project_id})
+            MATCH (a:ArchitectureDecision {project_id: $project_id})
             RETURN a.title as title, a.decision as decision, a.rationale as rationale
             ORDER BY a.created_at ASC LIMIT 5
             """
@@ -396,7 +396,7 @@ class KnowledgeGraphTools:
 
             # Fetch patterns
             pattern_query = """
-            MATCH (pt:Pattern {id: $project_id})
+            MATCH (pt:Pattern {project_id: $project_id})
             RETURN pt.name as name, pt.description as description, pt.code_snippet as code_snippet
             ORDER BY pt.created_at DESC LIMIT 5
             """
@@ -404,7 +404,7 @@ class KnowledgeGraphTools:
 
             # Fetch requirements
             req_query = """
-            MATCH (r:Requirement {id: $project_id})
+            MATCH (r:Requirement {project_id: $project_id})
             RETURN r.text as text
             ORDER BY r.created_at ASC LIMIT 10
             """

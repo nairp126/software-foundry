@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import json
 import os
 import re
@@ -9,6 +9,7 @@ from foundry.llm.factory import LLMProviderFactory
 from foundry.llm.base import LLMMessage
 from foundry.testing.test_generator import TestGenerator, TestFramework
 from foundry.testing.quality_gates import QualityGates
+from foundry.graph.ingestion import IngestionPipeline
 
 
 logger = logging.getLogger(__name__)
@@ -66,8 +67,10 @@ class EngineerAgent(Agent):
         try:
             from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
             self.kg_tools = KnowledgeGraphTools()
+            self.ingestion_pipeline = IngestionPipeline()
         except ImportError:
             self.kg_tools = None
+            self.ingestion_pipeline = None
         
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         if message.message_type == MessageType.TASK:
@@ -93,6 +96,12 @@ class EngineerAgent(Agent):
         """
         # Fix L: Domain Grounding
         grounding_anchor = f"\nABSOLUTE DOMAIN: {requirements}\n" if requirements else ""
+        
+        # Root Cause 2 & 3 Fix: Inject project manifest/responsibility mapping
+        project_manifest = ""
+        if context:
+            project_manifest = f"\nPROJECT STRUCTURE & RESPONSIBILITIES:\n{context}\n"
+        
         system_prompt = f"""You are an expert Software Engineer.{grounding_anchor}
         Your goal is to write high-quality, professional-grade code for the file: {filename}
 
@@ -107,8 +116,9 @@ class EngineerAgent(Agent):
         - Use environment variables for secrets, never hardcode credentials
         - Write clean, readable, well-documented code
         - MANDATORY: Include comprehensive unit tests for all logic. Place tests in a 'tests/' directory.
+        - SEPARATION OF CONCERNS: Do NOT redefine models, schemas, or database logic already defined in other files. Import them instead.
 
-        {context}
+        {project_manifest}
         
         CRITICAL: Return ONLY the raw code for {filename}. 
         Do NOT include any introduction, explanations, or conclusions after the code.
@@ -145,7 +155,9 @@ class EngineerAgent(Agent):
         # Step 3: Generate code for each file sequentially for stability
         generated_files = {}
         files_to_generate = self._parse_file_list(file_structure)
-        files_to_generate = files_to_generate[:5]  # Support slightly larger MVPs
+        
+        # Root Cause 1 Fix: Raise file cap to 50 to accommodate larger projects (Req 20.3)
+        files_to_generate = files_to_generate[:50]  
 
         for i, filename in enumerate(files_to_generate):
             logger.info(f"Generating content for {filename} ({i+1}/{len(files_to_generate)})...")
@@ -187,22 +199,56 @@ class EngineerAgent(Agent):
                 )
 
             generated_files[filename] = code
+            
+            # INCREMENTAL INGESTION (Graph-First Strategy)
+            if self.ingestion_pipeline:
+                try:
+                    await self.ingestion_pipeline.ingest_source(
+                        code=code,
+                        file_path=filename,
+                        project_id=project_id
+                    )
+                    logger.info(f"Successfully ingested {filename} into Knowledge Graph.")
+                except Exception as e:
+                    logger.warning(f"Failed to ingest {filename} into KG: {e}")
+
+        # Ensure structural integrity (__init__.py files)
+        if language == "python":
+            generated_files = self._ensure_init_files(generated_files)
 
         # Standardize extensions and cleanup
         final_repo = {}
         for filename, content in generated_files.items():
             f_clean = filename.strip()
             # ONLY rename if the language is python AND we have a mismatch
-            # This ensures we don't break JS/TS/Go/Java projects (HIGH-ENG-1)
             if language == "python" and not f_clean.endswith(".py") and "." in f_clean:
-                # Basic safety: if it's clearly a code file but not .py, rename it
                 name_part, ext_part = os.path.splitext(f_clean)
                 if ext_part.lower() in ['.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs']:
                     f_clean = name_part + ".py"
             
+            # Structural Enforcement: All code files starting with test_ should be in tests/
+            if (f_clean.startswith("test_") or f_clean.endswith("_test.py")) and not f_clean.startswith("tests/"):
+                f_clean = f"tests/{f_clean}"
+                
             final_repo[f_clean] = content
 
+        # Step 4: Generate tests and merge them into the repository
         test_files = await self.generate_tests(final_repo, language)
+        for t_name, t_content in test_files.items():
+            # Ensure tests from generator also go to tests/
+            t_clean = t_name.strip()
+            if not t_clean.startswith("tests/"):
+                t_clean = f"tests/{t_clean}"
+            final_repo[t_clean] = t_content
+
+        # Step 5: Ensure dependency manifest exists
+        manifest_files = ["requirements.txt", "package.json", "go.mod", "pom.xml", "build.gradle"]
+        if not any(m in final_repo for m in manifest_files):
+            logger.info("Dependency manifest missing. Generating fallback...")
+            manifest_name, manifest_content = await self._generate_dependency_manifest(final_repo, language)
+            if manifest_name:
+                final_repo[manifest_name] = manifest_content
+
         quality_result = await self.run_quality_gates(final_repo, language, "/tmp/project")
         integration_report = self._validate_component_integration(final_repo)
 
@@ -213,13 +259,37 @@ class EngineerAgent(Agent):
             payload={
                 "code_repo": final_repo,
                 "code": final_repo,
-                "tests": test_files,
-                "file_structure": file_structure,
+                "tests": {k: v for k, v in final_repo.items() if k.startswith("tests/")},
+                "file_structure": list(final_repo.keys()),
                 "integration_report": integration_report,
                 "quality_gates": quality_result,
                 "language": language
             }
         )
+
+    def _ensure_init_files(self, code_files: Dict[str, str]) -> Dict[str, str]:
+        """Ensures all directories in the project have __init__.py files."""
+        new_files = code_files.copy()
+        dirs_to_check = set()
+        
+        for filename in code_files.keys():
+            path_parts = filename.replace("\\", "/").split("/")
+            # Add all parent directories
+            for i in range(1, len(path_parts)):
+                dirs_to_check.add("/".join(path_parts[:i]))
+        
+        for d in dirs_to_check:
+            if not d or d == ".": continue
+            init_file = f"{d}/__init__.py"
+            if init_file not in new_files:
+                logger.info(f"Injecting missing structural file: {init_file}")
+                new_files[init_file] = "# Structural initialization\n"
+        
+        # Check root as well if src exists
+        if "src" in dirs_to_check and "src/__init__.py" not in new_files:
+             new_files["src/__init__.py"] = "# Structural initialization\n"
+             
+        return new_files
     
     async def _plan_file_structure(self, architecture: str, prd: str = "", language: str = "python") -> str:
         from foundry.utils.language_config import get_language_config
@@ -231,8 +301,10 @@ class EngineerAgent(Agent):
             f"You are an expert {lang_name} Engineer.\n"
             f"Plan the file structure for a project based on the following architecture.\n\n"
             f"Use {ext} extensions for source files.\n"
+            f"MANDATORY: You MUST include a dependency manifest file ('requirements.txt' for Python, 'package.json' for JS/TS).\n"
+            f"MANDATORY: You MUST include a 'README.md' and a '.env.example'.\n"
             "Return ONLY a JSON list of file paths "
-            f'(e.g. ["src/main{ext}", "src/utils{ext}", "README.md"]).'
+            f'(e.g. ["requirements.txt", "src/main{ext}", "src/utils{ext}", "README.md"]).'
         )
 
         user_prompt = f"Architecture:\n{architecture}"
@@ -272,9 +344,21 @@ class EngineerAgent(Agent):
                     continue
                 if "." not in os.path.basename(clean_p) and clean_p != "Dockerfile":
                     continue
+                # Structural Enforcement: All test files must reside in tests/ (Req 15.2)
+                if (clean_p.startswith("test_") or "_test." in clean_p) and not clean_p.startswith("tests/"):
+                    clean_p = f"tests/{clean_p}"
+                    
                 filtered_paths.append(clean_p)
                 
-            return filtered_paths
+            # DE-DUPLICATION and Priority Protection
+            seen = set()
+            unique_paths = []
+            for p in filtered_paths:
+                if p not in seen:
+                    unique_paths.append(p)
+                    seen.add(p)
+            
+            return unique_paths
         except Exception as e:
             logger.error(f"Error parsing file list: {e}. Falling back to default.")
             return ["main.py", "requirements.txt", "README.md"]
@@ -292,9 +376,6 @@ class EngineerAgent(Agent):
                     # Recurse if value is a sub-structure
                     paths.extend(self._flatten_file_structure(value, new_path))
                 else:
-                    # If value is a leaf (filename or string mapping), use the key as the path
-                    # Some architectures use {"main.js": "Main entry point"}, we want "main.js"
-                    # Others use {"src": {"main.js": "..."}}, we want "src/main.js"
                     paths.append(new_path)
         elif isinstance(structure, list):
             for item in structure:
@@ -305,8 +386,16 @@ class EngineerAgent(Agent):
         elif isinstance(structure, str):
             paths.append(os.path.join(current_path, structure) if current_path else structure)
         
-        # Deduplicate and normalize
-        return list(set(p.replace("\\", "/") for p in paths if p))
+        # Root Cause 2 Fix: Preserve order using a list-based deduplication
+        seen = set()
+        ordered_paths = []
+        for p in paths:
+            norm_p = p.replace("\\", "/").strip("/")
+            if norm_p and norm_p not in seen:
+                seen.add(norm_p)
+                ordered_paths.append(norm_p)
+        
+        return ordered_paths
 
     def _detect_language(self, architecture_content: str, graph_state_language: str = "") -> str:
         """Detect language from GraphState first, then fall back to architecture content."""
@@ -377,17 +466,14 @@ class EngineerAgent(Agent):
 
             if kg_surgical_context:
                 # GraphRAG path: Use precise, structured context from the KG
-                context_str = kg_surgical_context
+                context_str = f"\n\nKNOWLEDGE GRAPH CONTEXT (Related Symbols & Definitions):\n{kg_surgical_context}\n"
             else:
-                # FALLBACK: KG has no data yet (first generation pass).
-                # Use truncated raw code as a safety net.
-                context_str = "\n\nCRITICAL CONTEXT - PREVIOUSLY GENERATED FILES IN THIS SESSION:\n"
-                context_str += "You MUST ensure the new file is fully compatible with the frameworks, imports, naming conventions, and logic used in these files. Do NOT hallucinate conflicting frameworks.\n"
-                for prev_file, prev_code in previously_generated.items():
-                    truncated_code = prev_code
-                    if len(prev_code) > 2000:
-                        truncated_code = f"... [TRUNCATED] ...\n{prev_code[-2000:]}"
-                    context_str += f"\n--- {prev_file} ---\n```python\n{truncated_code}\n```\n"
+                # FALLBACK: KG has no data for these specific files yet (e.g. first file).
+                # Only use name hints to avoid context bloat.
+                context_str = "\n\nCRITICAL CONTEXT - THE FOLLOWING FILES HAVE BEEN GENERATED AND ARE AVAILABLE IN THE REPO:\n"
+                context_str += "You MUST ensure imports and naming conventions match these files Exactly.\n"
+                context_str += "\n".join([f"  - {f}" for f in previously_generated.keys()])
+                context_str += "\nOnly import and use what has been defined.\n"
 
         code = await self._request_code_generation(
             filename, 
@@ -430,6 +516,19 @@ class EngineerAgent(Agent):
         for pattern in chatter_patterns:
             clean_content = re.sub(pattern, '', clean_content, flags=re.DOTALL | re.IGNORECASE).strip()
             
+        # 4. DIVERSITY WATCHDOG: Detect and fix infinite repetition loops
+        # If we see a block of text (like 3+ lines) repeating 5+ times, truncate it
+        lines = clean_content.split('\n')
+        if len(lines) > 20:
+            for i in range(len(lines) - 10):
+                block = "\n".join(lines[i:i+3])
+                if block.strip() and clean_content.count(block) > 5:
+                    logger.warning(f"Diversity Watchdog triggered: Detected repeating block. Truncating.")
+                    # Keep the first occurrence and truncate
+                    first_idx = clean_content.find(block) + len(block)
+                    clean_content = clean_content[:first_idx] + "\n# [TRUNCATED DUE TO REPETITION LOOP]\n"
+                    break
+
         return clean_content
 
     async def _recover_with_correct_language(self, filename: str, dirty_code: str, architecture: str, target_language: str = "python") -> str:
@@ -684,17 +783,24 @@ class EngineerAgent(Agent):
         """
         test_files = {}
         
+        # 1. GENERATE GLOBAL MOCKS (Phase 3 Optimization)
+        shared_mocks = ""
+        if language == "python":
+            mocks_filename, shared_mocks = await self._generate_global_mocks(code_files, language)
+            if mocks_filename and shared_mocks:
+                test_files[mocks_filename] = shared_mocks
+        
         # Select test framework
         framework = self.test_generator.select_framework(language, tech_stack)
         
         # Sequential test generation for stability
         for filename, code in code_files.items():
-            if filename.endswith(('.txt', '.md', '.json', '.yml', '.yaml')):
+            if filename.endswith(('.txt', '.md', '.json', '.yml', '.yaml')) or "mocks.py" in filename:
                 continue
             
             try:
                 test_code = await self.test_generator.generate_unit_tests(
-                    code, filename, language, framework
+                    code, filename, language, framework, shared_mocks=shared_mocks
                 )
                 test_filename = self.test_generator.get_test_filename(filename, framework)
                 test_files[test_filename] = test_code
@@ -702,6 +808,35 @@ class EngineerAgent(Agent):
                 logger.warning(f"Failed to generate tests for {filename}: {e}")
         
         return test_files
+
+    async def _generate_global_mocks(self, code_files: Dict[str, str], language: str) -> Tuple[str, str]:
+        """Generates a centralized mocks file based on the project structure."""
+        if language != "python":
+            return "", ""
+            
+        system_prompt = (
+            f"You are an expert {language} QA Engineer. Analyze the provided project files "
+            f"and generate a single, comprehensive 'tests/mocks.py' file containing mocks for ALL "
+            f"external dependencies (databases, APIs, third-party services) and complex internal services.\n"
+            "This file will be used by ALL unit tests. Ensure mocks are robust and reusable."
+        )
+        
+        # Summary of files to help mock generation
+        file_summary = "\n".join([f"- {f}" for f in code_files.keys()])
+        user_prompt = f"Project Files:\n{file_summary}\n\nGenerate tests/mocks.py content ONLY."
+        
+        messages = [
+            LLMMessage(role="system", content=system_prompt),
+            LLMMessage(role="user", content=user_prompt)
+        ]
+        
+        try:
+            response = await self.llm.generate(messages, temperature=0.1)
+            mock_content = self._clean_code(response.content)
+            return "tests/mocks.py", mock_content
+        except Exception as e:
+            logger.error(f"Failed to generate global mocks: {e}")
+            return "", ""
 
 
     async def run_quality_gates(
@@ -738,3 +873,43 @@ class EngineerAgent(Agent):
                 "error": str(e),
                 "summary": f"Quality gates execution failed: {e}",
             }
+    async def _generate_dependency_manifest(self, code_repo: Dict[str, str], language: str) -> Tuple[str, str]:
+        """Scans imports and generates a fallback dependency manifest."""
+        import re
+        
+        manifest_name = "requirements.txt"
+        if language == "javascript" or language == "typescript":
+            manifest_name = "package.json"
+        elif language == "go":
+            manifest_name = "go.mod"
+        
+        system_prompt = (
+            f"You are a DevOps expert. Based on the provided code filenames and their imports, "
+            f"generate a standard {manifest_name} file for this {language} project.\n"
+            "Include ALL necessary third-party libraries. Use generic versions if not sure.\n"
+            "Return ONLY the file content, no markdown blocks."
+        )
+        
+        # Collect imports to help the LLM
+        import_summary = []
+        for filename, content in code_repo.items():
+            if language == "python" and filename.endswith(".py"):
+                imports = re.findall(r"^(?:from|import) (\w+)", content, re.MULTILINE)
+                import_summary.append(f"{filename}: {', '.join(set(imports))}")
+            elif (language == "javascript" or language == "typescript") and filename.endswith((".js", ".ts", ".jsx", ".tsx")):
+                imports = re.findall(r"(?:import|require)\(?['\"]([^'\".]+)", content)
+                import_summary.append(f"{filename}: {', '.join(set(imports))}")
+
+        user_prompt = f"Scanned Imports:\n" + "\n".join(import_summary[:50]) # Cap for context
+        
+        messages = [
+            LLMMessage(role="system", content=system_prompt),
+            LLMMessage(role="user", content=user_prompt)
+        ]
+        
+        try:
+            response = await self.llm.generate(messages, temperature=0.1)
+            return manifest_name, response.content.strip()
+        except Exception as e:
+            logger.error(f"Failed to generate fallback manifest: {e}")
+            return "", ""

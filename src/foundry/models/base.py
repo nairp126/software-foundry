@@ -1,8 +1,7 @@
 """Base model with common fields."""
 
 from datetime import datetime
-from sqlalchemy import Column, DateTime, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, DateTime, String, UUID
 import uuid
 
 

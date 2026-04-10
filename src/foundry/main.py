@@ -29,7 +29,7 @@ from sqlalchemy import select, func
 from foundry.config import settings
 from foundry.redis_client import redis_client
 from foundry.orchestrator import AgentOrchestrator
-from foundry.database import AsyncSessionLocal, get_db
+from foundry.database import AsyncSessionLocal, get_db, init_db
 from foundry.models.project import Project, ProjectStatus
 from sqlalchemy.ext.asyncio import AsyncSession
 from foundry.models.artifact import Artifact, ArtifactType
@@ -72,6 +72,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
     await redis_client.connect()
+    
+    # Initialize Database Tables (Req 20.3)
+    try:
+        await init_db()
+        logger.info("Database tables initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database tables: {e}")
     
     # Initialize Knowledge Graph
     try:

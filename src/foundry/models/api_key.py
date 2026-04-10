@@ -5,7 +5,7 @@ import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy import Column, String, Boolean, DateTime, Integer
-from sqlalchemy.dialects.postgresql import INET
+# Remove postgres-specific INET import
 
 from foundry.database import Base
 from foundry.models.base import BaseModel
@@ -22,7 +22,7 @@ class APIKey(BaseModel, Base):
     is_active = Column(Boolean, nullable=False, default=True, server_default="true")
     expires_at = Column(DateTime, nullable=True, doc="Expiration timestamp")
     last_used_at = Column(DateTime, nullable=True, doc="Last usage timestamp")
-    last_used_ip = Column(INET, nullable=True, doc="Last IP address used")
+    last_used_ip = Column(String(45), nullable=True, doc="Last IP address used")
     
     # Rate limiting
     rate_limit_per_minute = Column(Integer, nullable=False, default=60, doc="Max requests per minute")

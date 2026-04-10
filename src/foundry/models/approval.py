@@ -3,8 +3,7 @@
 import enum
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
-from sqlalchemy import Column, String, Text, ForeignKey, Enum as SAEnum, Float, DateTime
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Column, String, Text, ForeignKey, Enum as SAEnum, Float, DateTime, JSON, UUID
 from sqlalchemy.orm import relationship
 from pydantic import BaseModel as PydanticBaseModel, Field
 
@@ -60,7 +59,7 @@ class ApprovalRequest(BaseModel, Base):
         index=True,
     )
     content = Column(
-        JSONB,
+        JSON,
         nullable=False,
         doc="Approval content including phantom file tree, tech stack, resources, etc.",
     )
@@ -90,7 +89,7 @@ class ApprovalRequest(BaseModel, Base):
         doc="When the user responded to this approval",
     )
     response = Column(
-        JSONB,
+        JSON,
         nullable=True,
         doc="User response including decision, modifications, and reason",
     )

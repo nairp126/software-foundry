@@ -164,7 +164,7 @@ class AgentOrchestrator:
     async def _publish_status_update(self, project_id: str, status: ProjectStatus, message: str = ""):
         """Publish status update to Redis for real-time WebSocket broadcasting."""
         from foundry.redis_client import redis_client
-        if redis_client.client:
+        if redis_client.is_connected:
             event_data = {
                 "type": "status_update",
                 "status": status.value,
@@ -181,6 +181,17 @@ class AgentOrchestrator:
         await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_pm)
         await self._publish_status_update(project_id, ProjectStatus.running_pm, "Starting requirements analysis...")
+        
+        # PRE-SEED KG WITH PROJECT NODE (Critical for relational linking)
+        try:
+            await self.kg_service.client.connect()
+            await self.kg_service.create_project(
+                project_id=project_id,
+                name=f"Project {project_id[:8]}",
+                metadata={"status": "initializing"}
+            )
+        except Exception as e:
+            logger.warning(f"Failed to pre-seed project in KG: {e}")
         
         # Get the latest message from the history if any
         user_prompt = state["messages"][-1].content if state["messages"] else ""
@@ -215,6 +226,18 @@ class AgentOrchestrator:
                 state.get("language", "python")
             )
             
+            # SEED KG WITH REQUIREMENTS
+            try:
+                if prd:
+                    await self.kg_service.client.connect()
+                    await self.kg_service.store_requirement(
+                        project_id=state["project_id"],
+                        text=prd if isinstance(prd, str) else json.dumps(prd),
+                        source_agent="ProductManager"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to seed requirements in KG: {e}")
+                
         return {
             "messages": [AIMessage(content=f"PRD generated:\n{prd}")],
             "project_context": {
@@ -266,6 +289,22 @@ class AgentOrchestrator:
                 state.get("language", "python")
             )
             
+            # SEED KG WITH ARCHITECTURE DECISIONS
+            try:
+                if architecture:
+                    await self.kg_service.client.connect()
+                    # Store as a monolithic architecture node for context
+                    await self.kg_service.store_architecture_decision(
+                        project_id=state["project_id"],
+                        title="System Architecture",
+                        decision=architecture if isinstance(architecture, str) else json.dumps(architecture),
+                        rationale="Initial design from ArchitectAgent",
+                        language=state.get("language", "python"),
+                        framework=state.get("framework", "")
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to seed architecture in KG: {e}")
+                
         return {
             "messages": [AIMessage(content=f"Architecture designed:\n{architecture}")],
             "project_context": {
@@ -377,7 +416,8 @@ class AgentOrchestrator:
                 **state["project_context"], 
                 "code_repo": code_repo, 
                 "architecture": architecture, 
-                "prd": prd
+                "prd": prd,
+                "entry_point": payload["entry_point"]
             }
         }
 
@@ -519,7 +559,8 @@ class AgentOrchestrator:
                 "code_repo": code_repo,
                 "architecture": architecture,
                 "language": state.get("language", "python"),
-                "project_id": state["project_id"]
+                "project_id": state["project_id"],
+                "entry_point": state["project_context"].get("entry_point", "app.py")
             }
         )
         

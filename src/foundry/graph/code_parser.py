@@ -119,6 +119,15 @@ class PythonCodeParser:
             with open(file_path, 'r', encoding='utf-8') as f:
                 source = f.read()
             
+            return self.parse_source(source, file_path)
+        
+        except Exception as e:
+            self.logger.error(f"Error reading {file_path}: {e}")
+            return None
+
+    def parse_source(self, source: str, file_path: str = "string_input") -> Optional[ParsedModule]:
+        """Parse Python source code string and extract structure."""
+        try:
             # DEFENSIVE: Strip markdown backticks if they leaked through
             if "```" in source:
                 source = source.replace("```python", "").replace("```", "").strip()
@@ -129,10 +138,10 @@ class PythonCodeParser:
             return self._parse_tree(tree, file_path)
         
         except SyntaxError as e:
-            self.logger.error(f"Syntax error in {file_path}: {e}")
+            self.logger.error(f"Syntax error in source from {file_path}: {e}")
             return None
         except Exception as e:
-            self.logger.error(f"Error parsing {file_path}: {e}")
+            self.logger.error(f"Error parsing source from {file_path}: {e}")
             return None
     
     def _parse_tree(self, tree: ast.AST, file_path: str) -> ParsedModule:

@@ -61,7 +61,12 @@ class TestGenerator:
         return self.FRAMEWORK_MAP.get(language, TestFramework.PYTEST)
 
     async def generate_unit_tests(
-        self, code: str, filename: str, language: str, framework: Optional[TestFramework] = None
+        self, 
+        code: str, 
+        filename: str, 
+        language: str, 
+        framework: Optional[TestFramework] = None,
+        shared_mocks: Optional[str] = None
     ) -> str:
         """Generate unit tests for the given code.
 
@@ -77,7 +82,7 @@ class TestGenerator:
         if framework is None:
             framework = self.select_framework(language)
 
-        prompt = self._build_test_generation_prompt(code, filename, language, framework)
+        prompt = self._build_test_generation_prompt(code, filename, language, framework, shared_mocks)
 
         messages = [LLMMessage(role="user", content=prompt)]
         response = await self.llm.generate(messages)
@@ -86,7 +91,12 @@ class TestGenerator:
         return test_code
 
     def _build_test_generation_prompt(
-        self, code: str, filename: str, language: str, framework: TestFramework
+        self, 
+        code: str, 
+        filename: str, 
+        language: str, 
+        framework: TestFramework,
+        shared_mocks: Optional[str] = None
     ) -> str:
         """Build prompt for test generation."""
         framework_instructions = self._get_framework_instructions(framework)
@@ -109,7 +119,10 @@ Requirements:
 6. Add appropriate assertions
 7. Mock external dependencies
 
+
 {framework_instructions}
+
+{f"Shared Mocks Available (use 'from tests.mocks import ...'):\n{shared_mocks}" if shared_mocks else ""}
 
 Generate ONLY the test code without explanations. Use proper {language} syntax."""
 
@@ -250,23 +263,23 @@ Be realistic about coverage estimation."""
 
         Returns:
             Test filename following framework conventions:
-            - pytest:  test_{stem}.py
-            - jest:    {stem}.test.js
-            - vitest:  {stem}.test.ts
-            - junit:   {Stem}Test.java  (PascalCase stem)
+            - pytest:  tests/test_{stem}.py
+            - jest:    tests/{stem}.test.js
+            - vitest:  tests/{stem}.test.ts
+            - junit:   tests/{Stem}Test.java  (PascalCase stem)
         """
         path = Path(source_filename)
         stem = path.stem
 
         if framework == TestFramework.PYTEST:
-            return f"test_{stem}.py"
+            return f"tests/test_{stem}.py"
         elif framework == TestFramework.JEST:
-            return f"{stem}.test.js"
+            return f"tests/{stem}.test.js"
         elif framework == TestFramework.VITEST:
-            return f"{stem}.test.ts"
+            return f"tests/{stem}.test.ts"
         elif framework == TestFramework.JUNIT:
             pascal_stem = stem[0].upper() + stem[1:] if stem else stem
-            return f"{pascal_stem}Test.java"
+            return f"tests/{pascal_stem}Test.java"
 
         # Fallback
-        return f"test_{stem}{path.suffix}"
+        return f"tests/test_{stem}{path.suffix}"

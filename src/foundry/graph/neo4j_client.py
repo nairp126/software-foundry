@@ -44,6 +44,7 @@ class Neo4jClient:
         """Close connection to Neo4j database."""
         if self._driver:
             await self._driver.close()
+            self._driver = None
             logger.info("Disconnected from Neo4j")
 
     @asynccontextmanager

@@ -104,6 +104,8 @@ class DevOpsAgent(Agent):
         user_prompt = f"""
         Architecture: {json.dumps(architecture, indent=2)}
         
+        Entry Point: {message.payload.get("entry_point", "app.py")}
+        
         Files in Repository: {", ".join(file_list)}
         
         Dependency Context:

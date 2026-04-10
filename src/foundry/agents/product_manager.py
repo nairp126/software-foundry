@@ -247,7 +247,6 @@ class ProductManagerAgent(Agent):
                         )
                     except Exception as e:
                         logger.warning(f"PM Agent KG store failed for requirement: {e}")
-                await knowledge_graph_service.disconnect()
         except Exception:
             pass  # Non-blocking — KG outage must never block the pipeline
 

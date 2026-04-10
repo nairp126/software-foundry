@@ -1,8 +1,7 @@
 """Artifact model for persisting generated files and outputs."""
 
 import enum
-from sqlalchemy import Column, String, Text, Enum as SAEnum, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Column, String, Text, Enum as SAEnum, ForeignKey, JSON, UUID
 from sqlalchemy.orm import relationship
 
 from foundry.database import Base
@@ -38,7 +37,7 @@ class Artifact(BaseModel, Base):
     )
     content = Column(Text, nullable=True)
     language = Column(String(50), nullable=True, index=True)
-    metadata_ = Column("metadata", JSONB, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
 
     # Relationships
     project = relationship("Project", back_populates="artifacts")

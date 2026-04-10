@@ -1,8 +1,7 @@
 """Project model for persisting generated projects."""
 
 import enum
-from sqlalchemy import Column, String, Text, Enum as SAEnum, ForeignKey
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, String, Text, Enum as SAEnum, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 
 from foundry.database import Base
@@ -51,10 +50,10 @@ class Project(BaseModel, Base):
     language = Column(String(50), nullable=False, default="python", server_default="python")
     framework = Column(String(100), nullable=True)
 
-    # Agent outputs stored as JSONB for flexibility
-    prd = Column(JSONB, nullable=True)
-    architecture = Column(JSONB, nullable=True)
-    code_review = Column(JSONB, nullable=True)
+    # Agent outputs stored as JSON for flexibility
+    prd = Column(JSON, nullable=True)
+    architecture = Column(JSON, nullable=True)
+    code_review = Column(JSON, nullable=True)
     generated_path = Column(String(512), nullable=True)
 
     # Relationships
