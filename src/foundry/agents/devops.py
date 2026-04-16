@@ -23,6 +23,11 @@ class DevOpsAgent(Agent):
     def __init__(self, model_name: Optional[str] = None):
         super().__init__(AgentType.DEVOPS, model_name)
         self.llm = LLMProviderFactory.create_provider(model_name=self.model_name)
+        try:
+            from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
+            self.kg_tools = KnowledgeGraphTools()
+        except ImportError:
+            self.kg_tools = None
 
     def _select_base_image(self, language: str, code_repo: Optional[Dict[str, str]] = None) -> str:
         """Select the correct base Docker image for the given language.
@@ -65,24 +70,35 @@ class DevOpsAgent(Agent):
         """
         base_image = self._select_base_image(language, code_repo)
 
-        # Context Extraction (Req 21.1 / BUG-DEV-1)
+        # 1. Context Extraction (Req 21.1 / BUG-DEV-1)
         file_list = []
         deps_content = ""
         if code_repo:
             file_list = list(code_repo.keys())
+            # Try to resolve entry point deterministically
+            from foundry.tools.import_resolver import ImportResolver
+            entry_point = ImportResolver.discover_entry_point(code_repo)
+            
             # Try to find dependency files for better Docker layer caching
             dep_files = ["requirements.txt", "package.json", "pom.xml", "build.gradle"]
             for f in dep_files:
                 if f in code_repo:
                     deps_content += f"\nFILE: {f}\n{code_repo[f][:1000]}\n"
 
+        # 2. KG Grounding (Fix: Blind Tool Access)
+        kg_project_context = ""
+        if self.kg_tools and project_id:
+            try:
+                kg_project_context = await self.kg_tools.get_project_summary_for_generation(project_id)
+            except Exception as e:
+                logger.warning(f"DevOps KG context retrieval failed: {e}")
+
         system_prompt = f"""You are an expert DevOps Engineer.
-        Generate deployment configuration files for a {language} project.
-        
-        BASE IMAGE: {base_image}
-        
+        {kg_project_context}
+
         CRITICAL: Use the provided File List and Dependency Context to ensure the Dockerfile 
         correctly handles the project structure and dependency management for {language}.
+        The resolved ENTRY POINT for this application is: {entry_point}
         
         You MUST generate the following files:
         1. `Dockerfile`: Optimized for production (multi-stage build if applicable).

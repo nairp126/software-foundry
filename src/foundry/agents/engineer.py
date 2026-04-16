@@ -10,6 +10,7 @@ from foundry.llm.base import LLMMessage
 from foundry.testing.test_generator import TestGenerator, TestFramework
 from foundry.testing.quality_gates import QualityGates
 from foundry.graph.ingestion import IngestionPipeline
+from foundry.tools.import_resolver import ImportResolver
 
 
 logger = logging.getLogger(__name__)
@@ -161,7 +162,16 @@ class EngineerAgent(Agent):
         # Root Cause 1 Fix: Raise file cap to 50 to accommodate larger projects (Req 20.3)
         files_to_generate = files_to_generate[:50]  
 
-        for i, filename in enumerate(files_to_generate):
+        for i, file_obj in enumerate(files_to_generate):
+            if isinstance(file_obj, dict):
+                filename = file_obj.get("path", "")
+                contract = file_obj.get("contract", "Implement according to standard architecture.")
+            else:
+                filename = str(file_obj)
+                contract = "Implement according to standard architecture."
+            
+            if not filename: continue
+            
             logger.info(f"Generating content for {filename} ({i+1}/{len(files_to_generate)})...")
 
             # KG: inject project summary into EVERY file's prompt (Req 16.1 / 19.3)
@@ -183,6 +193,7 @@ class EngineerAgent(Agent):
                 existing_code.get(filename) if existing_code else None,
                 project_id,
                 kg_project_summary=kg_project_summary,
+                file_contract=contract,
             )
 
             # 3-Attempt Language-Aware Recovery Loop
@@ -266,6 +277,15 @@ class EngineerAgent(Agent):
 
         quality_result = await self.run_quality_gates(final_repo, language, "/tmp/project")
         integration_report = self._validate_component_integration(final_repo)
+        
+        # New: Import Resolution Pre-flight (Fix: Quality Gap 2)
+        if language == "python":
+            logger.info("Running Import Resolution pre-flight...")
+            resolver = ImportResolver(final_repo)
+            resolution_report = resolver.resolve_all()
+            if resolution_report.get("missing_internal_imports") or resolution_report.get("syntax_errors"):
+                 logger.warning(f"Import Resolution found issues: {resolution_report}")
+                 integration_report["import_resolution"] = resolution_report
 
         return AgentMessage(
             sender=self.agent_type,
@@ -318,8 +338,8 @@ class EngineerAgent(Agent):
             f"Use {ext} extensions for source files.\n"
             f"MANDATORY: You MUST include a dependency manifest file ('requirements.txt' for Python, 'package.json' for JS/TS).\n"
             f"MANDATORY: You MUST include a 'README.md' and a '.env.example'.\n"
-            "Return ONLY a JSON list of file paths "
-            f'(e.g. ["requirements.txt", "src/main{ext}", "src/utils{ext}", "README.md"]).'
+            "Return ONLY a JSON object with a 'files' array, where each item has a 'path' and a strictly defined 'contract' describing what logic MUST and MUST NOT go into that file to ensure proper separation of concerns (e.g. no models in routers). "
+            f'(e.g. {{"files": [{{"path": "requirements.txt", "contract": "Dependencies"}}, {{"path": "src/main{ext}", "contract": "Flask routing only. MUST import models from src.models. DO NOT define database models here."}}]}}).'
         )
 
         user_prompt = f"Architecture:\n{architecture}"
@@ -332,9 +352,9 @@ class EngineerAgent(Agent):
         response = await self.llm.generate(messages, temperature=0.1)
         return response.content
 
-    def _parse_file_list(self, response_content: str) -> List[str]:
+    def _parse_file_list(self, response_content: str) -> List[Dict[str, str]]:
         """
-        Parses the Architect's file structure output into a flat list of paths.
+        Parses the Architect's file structure output into a list of file contracts.
         Language-aware: only renames extensions for Python projects.
         """
         try:
@@ -346,6 +366,37 @@ class EngineerAgent(Agent):
             # Use JSON loads to handle the possibly nested structure
             raw_structure = json.loads(content)
             
+            if isinstance(raw_structure, dict) and "files" in raw_structure:
+                file_contracts = []
+                for item in raw_structure["files"]:
+                    if "path" in item:
+                        # Language-aware correction
+                        clean_p = item["path"].strip()
+                        if not clean_p: continue
+                        if clean_p.endswith("/") or clean_p in ["src", "lib", "tests", "docs", "bin"]:
+                            continue
+                        if "." not in os.path.basename(clean_p) and clean_p != "Dockerfile":
+                            continue
+                        if (clean_p.startswith("test_") or "_test." in clean_p) and not clean_p.startswith("tests/"):
+                            clean_p = f"tests/{clean_p}"
+                        
+                        file_contracts.append({
+                            "path": clean_p,
+                            "contract": item.get("contract", "Implement according to standard architecture.")
+                        })
+                
+                # Check if valid results were extracted
+                if file_contracts:
+                    # De-duplicate while preserving order
+                    seen = set()
+                    unique_contracts = []
+                    for c in file_contracts:
+                        if c["path"] not in seen:
+                            unique_contracts.append(c)
+                            seen.add(c["path"])
+                    return unique_contracts
+
+            # LEGACY FALLBACK
             # RECURSIVE FLATTENING: Ensure we catch nested files like src/components/App.js
             flat_paths = self._flatten_file_structure(raw_structure)
             
@@ -370,13 +421,17 @@ class EngineerAgent(Agent):
             unique_paths = []
             for p in filtered_paths:
                 if p not in seen:
-                    unique_paths.append(p)
+                    unique_paths.append({"path": p, "contract": "Implement according to standard architecture."})
                     seen.add(p)
             
             return unique_paths
         except Exception as e:
             logger.error(f"Error parsing file list: {e}. Falling back to default.")
-            return ["main.py", "requirements.txt", "README.md"]
+            return [
+                {"path": "main.py", "contract": "Implement according to standard architecture."}, 
+                {"path": "requirements.txt", "contract": "Dependencies"}, 
+                {"path": "README.md", "contract": "Project documentation"}
+            ]
 
     def _flatten_file_structure(self, structure: Any, current_path: str = "") -> List[str]:
         """
@@ -439,6 +494,7 @@ class EngineerAgent(Agent):
         existing_version: str = None,
         project_id: str = "current",
         kg_project_summary: str = "",
+        file_contract: str = "",
     ) -> str:
         """
         Generate file content with coding standards and security measures.
@@ -448,6 +504,9 @@ class EngineerAgent(Agent):
         
         # KG Context Integration
         kg_context = ""
+        if file_contract:
+            kg_context += f"\n\nCRITICAL ARCHITECTURAL CONTRACT FOR {filename}:\n{file_contract}\nYou MUST strictly adhere to this boundary. Do not implement logic that belongs in another file.\n"
+
         if self.kg_tools and fix_instructions:
             try:
                 # Try to get context for the component we are fixing

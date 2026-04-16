@@ -27,6 +27,7 @@ from foundry.sandbox.error_analysis import (
     CodeFix,
 )
 from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
+from foundry.tools.import_resolver import ImportResolver
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ class ReflexionEngine(Agent):
                 return await self.execute_and_fix(
                     code_repo=message.payload.get("code_repo") or message.payload.get("code"),
                     language=message.payload.get("language", "python"),
-                    entry_point=message.payload.get("entry_point", "main.py"),
+                    entry_point=message.payload.get("entry_point"),
                     dependencies=message.payload.get("dependencies", []),
                     feedback=message.payload.get("feedback"),
                     project_id=message.payload.get("project_id", "current")
@@ -407,12 +408,29 @@ class ReflexionEngine(Agent):
             except Exception as e:
                 logger.warning(f"Failed to extract dependencies: {e}")
 
+        # 1. Entry Point Discovery (Fix: Blind pathing)
+        if not entry_point or entry_point == "main.py":
+            resolved_entry = ImportResolver.discover_entry_point(current_repo)
+            if resolved_entry != entry_point:
+                logger.info(f"Resolved entry point from {entry_point} to {resolved_entry}")
+                entry_point = resolved_entry
+
         while attempt < self.MAX_RETRY_ATTEMPTS:
             attempt += 1
             logger.info(f"Execution attempt {attempt}/{self.MAX_RETRY_ATTEMPTS}")
             
-            # Execute code
+            # 2. Execute code (Main Entry Point)
             result = await self.execute_code(current_repo, self.sandbox_env, language, entry_point, dependencies)
+            
+            # 3. New: Run tests if available (Fix: Quality Gap 5)
+            test_files = [f for f in current_repo.keys() if f.startswith("tests/") and f.endswith(".py")]
+            if result.success and test_files and language == "python":
+                logger.info(f"Entry point {entry_point} ran successfully. Running {len(test_files)} tests via pytest...")
+                test_result = await self.execute_code(current_repo, self.sandbox_env, language, "pytest", dependencies)
+                if not test_result.success:
+                    logger.warning("Main execution passed but tests failed. Triggering fix for logic.")
+                    result = test_result
+                    result.stderr = f"TEST FAILURES DETECTED:\n{test_result.stdout}\n{test_result.stderr}"
             execution_history.append({
                 "attempt": attempt,
                 "success": result.success,

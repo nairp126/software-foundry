@@ -637,6 +637,18 @@ class KnowledgeGraphService:
         except Exception as e:
             logger.warning(f"store_error_fix failed (non-blocking): {e}")
 
+    async def get_context_for_agent(
+        self,
+        project_id: str,
+        component_name: str,
+        context_depth: int = 2
+    ) -> Dict[str, Any]:
+        """Compatibility alias for get_project_context with component-specific focus."""
+        return await self.get_project_context(
+            project_id=project_id,
+            focus_components=[component_name] if component_name else None
+        )
+
 
 # Global Knowledge Graph service instance
 knowledge_graph_service = KnowledgeGraphService()
