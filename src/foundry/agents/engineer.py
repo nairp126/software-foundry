@@ -117,6 +117,8 @@ class EngineerAgent(Agent):
         - Write clean, readable, well-documented code
         - MANDATORY: Include comprehensive unit tests for all logic. Place tests in a 'tests/' directory.
         - SEPARATION OF CONCERNS: Do NOT redefine models, schemas, or database logic already defined in other files. Import them instead.
+        - CRITICAL: Every function MUST contain real implementation logic. Using 'pass', 'TODO', or empty function bodies is STRICTLY FORBIDDEN. If a function should perform arithmetic, it must contain the actual math. If a function should query a database, it must contain the actual query code.
+        - COMPLETENESS CHECK: Before finishing each file, verify that EVERY function has a return statement or produces a side-effect. No function should be a no-op.
 
         {project_manifest}
         
@@ -200,11 +202,24 @@ class EngineerAgent(Agent):
 
             generated_files[filename] = code
             
+            # STUB DETECTION: Reject files with empty function bodies
+            if language == "python":
+                stubs = self._detect_stub_functions(code, filename)
+                if stubs and not filename.endswith("__init__.py"):
+                    logger.warning(f"Stub functions detected in {filename}: {stubs}. Re-generating with enforcement.")
+                    code = await self._generate_file_content(
+                        filename, architecture_content, language, generated_files,
+                        prd_content, requirements + "\nCRITICAL: The previous generation contained empty function bodies (pass statements). You MUST implement the actual logic this time.",
+                        "", existing_code.get(filename) if existing_code else None,
+                        project_id
+                    )
+                    generated_files[filename] = code
+
             # INCREMENTAL INGESTION (Graph-First Strategy)
             if self.ingestion_pipeline:
                 try:
                     await self.ingestion_pipeline.ingest_source(
-                        code=code,
+                        code=generated_files[filename],
                         file_path=filename,
                         project_id=project_id
                     )
@@ -468,12 +483,15 @@ class EngineerAgent(Agent):
                 # GraphRAG path: Use precise, structured context from the KG
                 context_str = f"\n\nKNOWLEDGE GRAPH CONTEXT (Related Symbols & Definitions):\n{kg_surgical_context}\n"
             else:
-                # FALLBACK: KG has no data for these specific files yet (e.g. first file).
-                # Only use name hints to avoid context bloat.
-                context_str = "\n\nCRITICAL CONTEXT - THE FOLLOWING FILES HAVE BEEN GENERATED AND ARE AVAILABLE IN THE REPO:\n"
-                context_str += "You MUST ensure imports and naming conventions match these files Exactly.\n"
-                context_str += "\n".join([f"  - {f}" for f in previously_generated.keys()])
-                context_str += "\nOnly import and use what has been defined.\n"
+                # FALLBACK: Inject truncated content of key files for cross-file coherence
+                context_str = "\n\nCRITICAL CONTEXT - PREVIOUSLY GENERATED FILES:\n"
+                context_str += "You MUST import from and be compatible with these files. Do NOT redefine their classes/functions.\n\n"
+                for prev_file, prev_content in previously_generated.items():
+                    # Inject up to 800 chars of each file for signature/model visibility
+                    truncated = prev_content[:800]
+                    if len(prev_content) > 800:
+                        truncated += "\n    # ... [truncated]"
+                    context_str += f"--- {prev_file} ---\n{truncated}\n\n"
 
         code = await self._request_code_generation(
             filename, 
@@ -489,6 +507,20 @@ class EngineerAgent(Agent):
         
         return code
     
+    def _detect_stub_functions(self, code: str, filename: str) -> List[str]:
+        """Detect functions that are just stubs (pass, ..., NotImplementedError)."""
+        stub_patterns = [
+            r'def\s+\w+\([^)]*\).*:\s*\n\s+(pass|\.\.\.)\s*$',
+            r'def\s+\w+\([^)]*\).*:\s*\n\s+#.*\n\s+(pass|\.\.\.)\s*$',
+            r'def\s+\w+\([^)]*\).*:\s*\n\s+"""[^"]*"""\s*\n\s+(pass|\.\.\.)\s*$',
+        ]
+        stubs = []
+        for pattern in stub_patterns:
+            matches = re.finditer(pattern, code, re.MULTILINE)
+            for match in matches:
+                stubs.append(match.group(0)[:80])
+        return stubs
+
     def _clean_code(self, content: str) -> str:
         """
         Strips Markdown code blocks and other non-code text from LLM response.

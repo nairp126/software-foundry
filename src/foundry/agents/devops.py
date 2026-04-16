@@ -48,7 +48,8 @@ class DevOpsAgent(Agent):
             code_repo = message.payload.get("code_repo")
             language = message.payload.get("language", "python")
             project_id = message.payload.get("project_id")
-            return await self.prepare_deployment(architecture, code_repo, language, project_id)
+            entry_point = message.payload.get("entry_point", "main.py")
+            return await self.prepare_deployment(architecture, code_repo, language, project_id, entry_point)
         return None
 
     async def prepare_deployment(
@@ -56,7 +57,8 @@ class DevOpsAgent(Agent):
         architecture: Dict[str, Any],
         code_repo: Optional[Dict[str, str]] = None,
         language: str = "python",
-        project_id: Optional[str] = None
+        project_id: Optional[str] = None,
+        entry_point: str = "main.py"
     ) -> AgentMessage:
         """
         Generates deployment configurations (Dockerfile, docker-compose.yml, etc).
@@ -104,7 +106,7 @@ class DevOpsAgent(Agent):
         user_prompt = f"""
         Architecture: {json.dumps(architecture, indent=2)}
         
-        Entry Point: {message.payload.get("entry_point", "app.py")}
+        Entry Point: {entry_point}
         
         Files in Repository: {", ".join(file_list)}
         
@@ -149,18 +151,45 @@ class DevOpsAgent(Agent):
                 break # Success
             except json.JSONDecodeError as je:
                 logger.error(f"DevOps Agent JSON syntax error on attempt {attempt_num} at line {je.lineno} col {je.colno}: {je.msg}")
-                if attempt_num == max_retries:
-                    deployment_data = {
-                        "error": f"JSON syntax error: {str(je)}",
-                        "raw_response": response.content[:1000] if response else "No response"
-                    }
-            except Exception as e:
-                logger.error(f"DevOps Agent failed to parse deployment JSON on attempt {attempt_num}: {e}")
-                if attempt_num == max_retries:
-                    deployment_data = {
-                        "error": f"General parsing failure: {str(e)}",
-                        "raw_response": response.content[:1000] if response else "No response"
-                    }
+            # DETERMINISTIC FALLBACK: If LLM failed, generate basic but correct deployment files
+        if "error" in deployment_data:
+            logger.warning("LLM-based deployment generation failed. Using deterministic fallback.")
+            dep_install = "pip install --no-cache-dir -r requirements.txt" if language == "python" else "npm install"
+            dep_file = "requirements.txt" if language == "python" else "package.json"
+            run_cmd = f'["python", "{entry_point}"]' if language == "python" else f'["node", "{entry_point}"]'
+            
+            deployment_data = {
+                "Dockerfile": (
+                    f"FROM {base_image}\n"
+                    f"WORKDIR /app\n"
+                    f"COPY {dep_file} .\n"
+                    f"RUN {dep_install}\n"
+                    f"COPY . .\n"
+                    f"EXPOSE 8000\n"
+                    f"CMD {run_cmd}\n"
+                ),
+                "docker-compose.yml": (
+                    f"version: '3.8'\n"
+                    f"services:\n"
+                    f"  app:\n"
+                    f"    build: .\n"
+                    f"    ports:\n"
+                    f"      - '8000:8000'\n"
+                    f"    env_file:\n"
+                    f"      - .env\n"
+                ),
+                ".dockerignore": (
+                    "venv/\n.venv/\n__pycache__/\n*.pyc\n.git/\n"
+                    ".env\nnode_modules/\n.pytest_cache/\n"
+                ),
+                ".env.example": (
+                    "# Application Environment Variables\n"
+                    "APP_ENV=production\n"
+                    "APP_PORT=8000\n"
+                    "DATABASE_URL=sqlite:///data.db\n"
+                ),
+                "explanation": "Deterministic fallback — LLM JSON generation failed."
+            }
 
         return AgentMessage(
             sender=self.agent_type,

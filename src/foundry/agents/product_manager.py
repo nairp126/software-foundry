@@ -146,10 +146,13 @@ class ProductManagerAgent(Agent):
             if not isinstance(data.get("non_functional_requirements"), dict):
                 old_nfr = data.get("non_functional_requirements", [])
                 if isinstance(old_nfr, list):
+                    security_items = [s for s in old_nfr if "security" in s.lower() or "auth" in s.lower()]
+                    scalability_items = [s for s in old_nfr if "scale" in s.lower() or "load" in s.lower()]
+                    remaining = [s for s in old_nfr if s not in security_items and s not in scalability_items]
                     data["non_functional_requirements"] = {
-                        "security": [s for s in old_nfr if "security" in s.lower() or "auth" in s.lower()],
-                        "scalability": [s for s in old_nfr if "scale" in s.lower() or "load" in s.lower()],
-                        "performance": [s for s in old_nfr if s not in (data["non_functional_requirements"].get("security", []) + data["non_functional_requirements"].get("scalability", []))]
+                        "security": security_items,
+                        "scalability": scalability_items,
+                        "performance": remaining,
                     }
                 else:
                     data["non_functional_requirements"] = defaults["non_functional_requirements"]
@@ -247,8 +250,8 @@ class ProductManagerAgent(Agent):
                         )
                     except Exception as e:
                         logger.warning(f"PM Agent KG store failed for requirement: {e}")
-        except Exception:
-            pass  # Non-blocking — KG outage must never block the pipeline
+        except Exception as e:
+            logger.warning(f"PM Agent KG requirement storage block failed: {e}")
 
         return AgentMessage(
             sender=self.agent_type,

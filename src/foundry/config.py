@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     
     # Ollama Configuration (for local Qwen models - PRIMARY)
     ollama_base_url: str = Field(default="http://localhost:11434")
-    ollama_model_name: str = Field(default="qwen2.5-coder:7b")
+    ollama_model_name: str = Field(default="qwen2.5-coder:1.5b")
     
     # vLLM Configuration (for local Qwen models - ALTERNATIVE)
     vllm_base_url: str = Field(default="http://localhost:8001/v1")

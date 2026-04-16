@@ -422,24 +422,39 @@ class ReflexionEngine(Agent):
             
             # Check if execution succeeded
             if result.success:
-                logger.info("Code executed successfully!")
-                return AgentMessage(
-                    sender=self.agent_type,
-                    recipient=AgentType.ENGINEER,
-                    message_type=MessageType.RESPONSE,
-                    payload={
-                        "status": "success",
-                        "code_repo": current_repo,
-                        "fix_plan": "Self-healing loop succeeded in applying fixes.",
-                        "result": {
-                            "stdout": result.stdout,
-                            "stderr": result.stderr,
-                            "execution_time": result.execution_time,
-                            "attempts": attempt,
-                        },
-                        "execution_history": execution_history,
-                    }
-                )
+                # COMPLETENESS CHECK: Detect stub functions that "pass" syntax checks but are empty
+                stub_files = self._find_stub_files(current_repo, language)
+                if not stub_files:
+                    logger.info("Code executed successfully!")
+                    return AgentMessage(
+                        sender=self.agent_type,
+                        recipient=AgentType.ENGINEER,
+                        message_type=MessageType.RESPONSE,
+                        payload={
+                            "status": "success",
+                            "code_repo": current_repo,
+                            "fix_plan": "Self-healing loop succeeded in applying fixes.",
+                            "result": {
+                                "stdout": result.stdout,
+                                "stderr": result.stderr,
+                                "execution_time": result.execution_time,
+                                "attempts": attempt,
+                            },
+                            "execution_history": execution_history,
+                        }
+                    )
+                else:
+                    logger.warning(f"Execution passed but {len(stub_files)} files contain stub functions: {list(stub_files.keys())}")
+                    # Synthesize a fake error to trigger the fix loop
+                    result = ExecutionResult(
+                        success=False,
+                        stdout=result.stdout,
+                        stderr=f"INCOMPLETE IMPLEMENTATION: The following files contain empty function bodies (pass/...): {', '.join(stub_files.keys())}. Each function must contain real implementation logic.",
+                        exit_code=1,
+                        execution_time=result.execution_time,
+                        resource_usage=result.resource_usage,
+                        errors=[f"Stub function in {f}: {desc}" for f, desc in stub_files.items()]
+                    )
             
             # Check if should escalate
             if self.should_escalate(attempt, result):
@@ -666,6 +681,27 @@ class ReflexionEngine(Agent):
                 "code_repo": updated_repo,
             }
         )
+
+    def _find_stub_files(self, code_repo: Dict[str, str], language: str) -> Dict[str, str]:
+        """Find files that contain stub/empty function implementations."""
+        if language != "python":
+            return {}
+        
+        stub_files = {}
+        stub_pattern = re.compile(
+            r'(def\s+(\w+)\([^)]*\).*:\s*\n'       # function signature
+            r'(?:\s+(?:"""[^"]*"""|\'\'\'[^\']*\'\'\')?\s*\n)?'  # optional docstring
+            r'\s+pass\s*$)',                          # just pass
+            re.MULTILINE
+        )
+        for filename, content in code_repo.items():
+            if not filename.endswith('.py') or '__init__' in filename:
+                continue
+            matches = stub_pattern.findall(content)
+            if matches:
+                func_names = [m[1] for m in matches]
+                stub_files[filename] = f"Empty functions: {', '.join(func_names)}"
+        return stub_files
 
 
 # Alias for backward compatibility

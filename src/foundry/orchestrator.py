@@ -400,6 +400,17 @@ class AgentOrchestrator:
                 if name_match:
                     project_name = name_match.group(1).strip()
             
+            # Clear stale incremental nodes before full re-ingestion
+            # This preserves the real-time KG strategy (per-file during generation)
+            # while ensuring the final graph has no duplicates
+            try:
+                from foundry.services.knowledge_graph import knowledge_graph_service
+                await knowledge_graph_service.connect()
+                await knowledge_graph_service.clear_project(state["project_id"])
+                logger.info(f"Cleared stale KG data for project {state['project_id']} before re-ingestion")
+            except Exception as e:
+                logger.warning(f"Failed to clear KG before re-ingestion: {e}")
+            
             await ingestion_pipeline.ingest_project(
                 project_id=state["project_id"],
                 project_name=f"{project_name} ({state.get('language', 'python')})",
