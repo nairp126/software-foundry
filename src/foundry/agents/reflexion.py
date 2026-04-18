@@ -28,6 +28,7 @@ from foundry.sandbox.error_analysis import (
 )
 from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
 from foundry.tools.import_resolver import ImportResolver
+from foundry.utils.parsing import extract_json_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -528,13 +529,11 @@ class ReflexionEngine(Agent):
             
             # Use lower temp for fix plans to ensure JSON validity
             response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
-            
             try:
-                # Clean and parse JSON
-                content = response.content
-                if "```" in content:
-                    content = re.sub(r'```[a-z]*\n|```', '', content).strip()
-                fix_plan_dict = json.loads(content)
+                # Clean and parse JSON using robust utility
+                fix_plan_dict = extract_json_from_text(response.content)
+                if not fix_plan_dict or not isinstance(fix_plan_dict, dict):
+                    raise ValueError("Fix plan is missing or not a dictionary")
                 
                 # Apply the fixes to our repository (Self-healing!)
                 current_repo = self._apply_fix_plan_to_repo(current_repo, fix_plan_dict)
@@ -568,7 +567,7 @@ class ReflexionEngine(Agent):
             payload={
                 "status": "needs_fixes",
                 "code_repo": current_repo,
-                "fix_plan": fix_plan_dict.get("explanation", "Max retries reached") if 'fix_plan_dict' in locals() else "Unknown failure",
+                "fix_plan": (fix_plan_dict or {}).get("explanation", "Max retries reached") if 'fix_plan_dict' in locals() else "Unknown failure",
                 "execution_history": execution_history,
                 "error": error_context if 'error_context' in locals() else "Unknown failure"
             }
@@ -661,12 +660,9 @@ class ReflexionEngine(Agent):
         response = await self.llm.generate(messages, temperature=0.5)
 
         # Parse the LLM response as structured fix_plan JSON
-        try:
-            fix_plan_dict = json.loads(response.content)
-            if not isinstance(fix_plan_dict, dict):
-                raise ValueError("fix_plan is not a dict")
-        except Exception as e:
-            logger.warning(f"reflect_on_feedback: failed to parse fix_plan JSON: {e}")
+        fix_plan_dict = extract_json_from_text(response.content)
+        if not isinstance(fix_plan_dict, dict):
+            logger.warning(f"reflect_on_feedback: failed to parse fix_plan JSON from content: {response.content[:100]}")
             fix_plan_dict = {"files": {}}
 
         updated_repo = self._apply_fix_plan_to_repo(original_code, fix_plan_dict)

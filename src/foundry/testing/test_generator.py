@@ -90,6 +90,17 @@ class TestGenerator:
 
         return test_code
 
+    def _build_test_generation_prompt(
+        self, 
+        code: str, 
+        filename: str, 
+        language: str, 
+        framework: TestFramework, 
+        shared_mocks: Optional[str] = None
+    ) -> str:
+        """Build prompt for test generation."""
+        framework_instructions = self._get_framework_instructions(framework)
+        
         mocks_info = ""
         if shared_mocks:
             mocks_info = f"Shared Mocks Available (use 'from tests.mocks import ...'):\n{shared_mocks}"

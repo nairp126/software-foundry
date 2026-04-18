@@ -319,10 +319,16 @@ class IngestionPipeline:
         }
         
         try:
-            # Parse the source string
-            module = self.parser.parse_source(code, file_path)
+            # Parse the source string with correct parser based on extension
+            parser = self._get_parser(file_path)
+            if not parser:
+                self.logger.debug(f"Skipping KG ingestion for {file_path} (no parser registered)")
+                stats["success"] = True
+                return stats
+                
+            module = parser.parse_source(code, file_path)
             if not module:
-                stats["error"] = "Failed to parse source code"
+                stats["error"] = f"Failed to parse source code with {parser.__class__.__name__}"
                 return stats
             
             # Create module node

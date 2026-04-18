@@ -6,6 +6,7 @@ from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.base import LLMMessage
 from foundry.llm.factory import LLMProviderFactory
 from foundry.testing.quality_gates import QualityGates
+from foundry.utils.parsing import extract_json_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -139,34 +140,14 @@ class CodeReviewAgent(Agent):
         logger.debug(f"Code Review Raw Response: {str(review_data)[:200]}...")
         
         if isinstance(review_data, str):
-            try:
-                # 1. First try: Greedy extract between first { and last }
-                start = review_data.find('{')
-                end = review_data.rfind('}')
-                if start != -1 and end != -1 and end > start:
-                    clean_json = review_data[start:end+1]
-                else:
-                    clean_json = review_data.strip()
-                
-                # 2. Strip any remaining markdown fences
-                if "```" in clean_json:
-                    clean_json = re.sub(r'```[a-z]*\n|```', '', clean_json).strip()
-                
-                review_data = json.loads(clean_json)
-            except Exception as e:
-                logger.error(f"CRITICAL: Failed to parse review output for project {project_id}. Error: {e}.")
-                # Last resort fallback if it's mostly JSON but maybe has a trailing comma or something
-                try:
-                    import ast
-                    review_data = ast.literal_eval(clean_json)
-                    if not isinstance(review_data, dict):
-                         raise ValueError("Not a dictionary")
-                except:
-                    review_data = {
-                        "status": "REJECTED",
-                        "feedback": f"AUTO-REJECT: JSON parsing failed. Error: {str(e)[:100]}",
-                        "issues": [],
-                    }
+            review_data = extract_json_from_text(review_data)
+            if not review_data:
+                logger.error(f"CRITICAL: Failed to parse review output for project {project_id}.")
+                review_data = {
+                    "status": "REJECTED",
+                    "feedback": "AUTO-REJECT: JSON parsing failed after all extraction attempts.",
+                    "issues": [],
+                }
 
         # Ensure review_data is a dict
         if not isinstance(review_data, dict):

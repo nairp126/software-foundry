@@ -31,12 +31,10 @@ class KnowledgeGraphService:
     async def create_project(self, project_id: str, name: str, metadata: Dict[str, Any]) -> None:
         """Create a project node in the graph."""
         query = """
-        CREATE (p:Project {
-            id: $project_id,
-            name: $name,
-            created_at: datetime(),
-            metadata: $metadata
-        })
+        MERGE (p:Project {id: $project_id})
+        SET p.name = $name,
+            p.created_at = coalesce(p.created_at, datetime()),
+            p.metadata = $metadata
         RETURN p
         """
         await self.client.execute_write(
@@ -499,14 +497,12 @@ class KnowledgeGraphService:
         try:
             query = """
             MATCH (p:Project {id: $project_id})
-            CREATE (r:Requirement {
-                id: $id,
-                project_id: $project_id,
-                text: $text,
-                source_agent: $source_agent,
-                created_at: datetime()
-            })
-            CREATE (p)-[:CONTAINS]->(r)
+            MERGE (r:Requirement {id: $id})
+            SET r.project_id = $project_id,
+                r.text = $text,
+                r.source_agent = $source_agent,
+                r.created_at = coalesce(r.created_at, datetime())
+            MERGE (p)-[:CONTAINS]->(r)
             """
             await self.client.execute_write(
                 query,
@@ -648,6 +644,65 @@ class KnowledgeGraphService:
             project_id=project_id,
             focus_components=[component_name] if component_name else None
         )
+
+    async def get_project_subgraph(self, project_id: str) -> Dict[str, Any]:
+        """Fetch project-specific subgraph for D3 visualization."""
+        query = """
+        MATCH (p:Project {id: $project_id})
+        OPTIONAL MATCH (p)-[r*1..2]-(n)
+        WITH p, collect(distinct n) + p as nodes, [rel in collect(distinct last(r)) WHERE rel IS NOT NULL] as rels
+        RETURN 
+          [node in nodes | {
+              id: elementId(node), 
+              label: labels(node)[0], 
+              name: coalesce(node.name, node.title, node.filename, node.id, 'Unnamed'),
+              content: node.content,
+              file_path: node.file_path,
+              complexity: node.complexity,
+              signature: node.signature,
+              metadata: node.metadata
+          }] as nodes,
+          [rel in rels | {
+              id: elementId(rel),
+              source: elementId(startNode(rel)), 
+              target: elementId(endNode(rel)), 
+              type: type(rel),
+              metadata: rel.metadata
+          }] as links
+        """
+        result = await self.client.execute_read(query, {"project_id": project_id})
+        if not result or not result[0]:
+            logger.warning(f"No graph data found for project {project_id}")
+            return {"nodes": [], "links": []}
+        
+        # Fix: Defensive parsing of metadata JSON strings (Req 13.9)
+        # Use explicit list comprehension to ensure we create a new dictionary structure
+        raw_data = result[0]
+        nodes = []
+        for node in raw_data.get("nodes", []):
+            metadata = node.get("metadata")
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except Exception:
+                    metadata = {}
+            node["metadata"] = metadata or {}
+            nodes.append(node)
+            
+        links = []
+        for link in raw_data.get("links", []):
+            metadata = link.get("metadata")
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except Exception:
+                    metadata = {}
+            link["metadata"] = metadata or {}
+            links.append(link)
+            
+        logger.info(f"Returning subgraph for project {project_id} with {len(nodes)} nodes and {len(links)} links")
+        return {"nodes": nodes, "links": links}
+
 
 
 # Global Knowledge Graph service instance

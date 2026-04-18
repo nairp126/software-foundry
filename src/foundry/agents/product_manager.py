@@ -240,7 +240,7 @@ class ProductManagerAgent(Agent):
             if all_reqs:
                 from foundry.services.knowledge_graph import knowledge_graph_service
                 # Fix MED-PM-2: Use real project_id instead of slicing project_name
-                await knowledge_graph_service.connect()
+                await knowledge_graph_service.initialize()
                 for req_text in all_reqs:
                     try:
                         await knowledge_graph_service.store_requirement(

@@ -62,7 +62,7 @@ class ArtifactResponse(BaseModel):
 class ApprovalResponse(BaseModel):
     id: UUID
     project_id: UUID
-    stage: str
+    stage: Optional[str] = None
     status: str
     reviewer_comment: Optional[str] = None
     created_at: datetime
@@ -150,3 +150,33 @@ class ValidationErrorResponse(BaseModel):
     detail: List[ValidationErrorDetail]
     error_code: str = "validation_error"
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+# ---- Graph Schemas ---- #
+
+class GraphNodeData(BaseModel):
+    id: str
+    label: str
+    name: str
+    content: Optional[str] = None
+    file_path: Optional[str] = None
+    complexity: Optional[int] = None
+    signature: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class GraphLinkData(BaseModel):
+    source: str
+    target: str
+    type: str
+
+
+class GraphResponse(BaseModel):
+    nodes: List[GraphNodeData]
+    links: List[GraphLinkData]
+
+
+class ErrorResponse(BaseModel):
+    detail: str
+    error_code: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    path: Optional[str] = None

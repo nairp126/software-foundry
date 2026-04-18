@@ -4,6 +4,7 @@ import asyncio
 import logging
 import subprocess
 import sys
+import json
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, Any, List, Optional, Set
 from uuid import UUID, uuid4
@@ -56,9 +57,10 @@ from foundry.api.schemas import (
     APIKeyCreateRequest,
     APIKeyResponse,
     APIKeyCreateResponse,
-    ErrorResponse,
     ValidationErrorResponse,
     ValidationErrorDetail,
+    GraphResponse,
+    ErrorResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -391,6 +393,20 @@ async def delete_project(
     await db.commit()
 
 
+@app.get("/projects/{project_id}/graph", response_model=GraphResponse)
+async def get_project_graph(
+    project_id: UUID,
+    api_key: APIKey = Depends(require_api_key),
+):
+    """Get the current Knowledge Graph state for a project."""
+    try:
+        data = await knowledge_graph_service.get_project_subgraph(str(project_id))
+        return GraphResponse(**data)
+    except Exception as e:
+        logger.error(f"Failed to fetch graph for project {project_id}: {e}")
+        return GraphResponse(nodes=[], links=[])
+
+
 # ---- Approval Workflow ---- #
 
 @app.get("/projects/{project_id}/approval", response_model=Optional[ApprovalResponse])
@@ -497,14 +513,25 @@ async def reject_project(
     await db.commit()
     await db.refresh(approval)
 
-    # Also mark the project as FAILED
+    # Trigger background iteration
     proj_result = await db.execute(
         select(Project).where(Project.id == project_id)
     )
     project = proj_result.scalar_one_or_none()
     if project:
-        project.status = ProjectStatus.failed
+        project.status = ProjectStatus.running_architect
+        project.updated_at = datetime.utcnow()
         await db.commit()
+        
+        from foundry.main import _run_project_background
+        background_tasks.add_task(
+            _run_project_background,
+            str(project_id),
+            project.requirements,
+            language=project.language,
+            framework=project.framework,
+            resume_from="architect"
+        )
 
     return ApprovalResponse(
         id=approval.id,
@@ -826,9 +853,14 @@ async def project_websocket(websocket: WebSocket, project_id: UUID):
     _ws_connections[key].add(websocket)
 
     # Subscribe to project-specific Redis channel
-    pubsub = redis_client.client.pubsub()
-    channel = f"foundry:project:{key}"
-    await pubsub.subscribe(channel)
+    if not redis_client.is_connected:
+        logger.warning(f"WebSocket connecting for project {project_id} without Redis. Updates will be disabled.")
+        # We still allow connection for initial status fetch, but won't listen to pubsub
+        pubsub = None
+    else:
+        pubsub = redis_client.client.pubsub()
+        channel = f"foundry:project:{key}"
+        await pubsub.subscribe(channel)
 
     try:
         # Send initial status
@@ -846,17 +878,24 @@ async def project_websocket(websocket: WebSocket, project_id: UUID):
                 })
 
         # Listen for events from the orchestrator
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                data = json.loads(message["data"])
-                await websocket.send_json(data)
+        if pubsub:
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    data = json.loads(message["data"])
+                    await websocket.send_json(data)
+        else:
+            # Keep connection alive if no Redis
+            while True:
+                await asyncio.sleep(10)
+                await websocket.send_json({"type": "ping"})
                 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for project {project_id}")
     except Exception as e:
         logger.error(f"WebSocket error for project {project_id}: {e}")
     finally:
-        await pubsub.unsubscribe(channel)
+        if pubsub:
+            await pubsub.unsubscribe(channel)
         _ws_connections[key].discard(websocket)
         if not _ws_connections[key]:
             del _ws_connections[key]

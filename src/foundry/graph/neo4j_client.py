@@ -67,6 +67,14 @@ class Neo4jClient:
             records = await result.data()
             return records
 
+    async def execute_read(
+        self,
+        query: str,
+        parameters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Alias for execute_query to satisfy read-specific calls."""
+        return await self.execute_query(query, parameters)
+
     async def execute_write(
         self,
         query: str,

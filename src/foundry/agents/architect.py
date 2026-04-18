@@ -5,6 +5,7 @@ from datetime import datetime
 from foundry.agents.base import Agent, AgentType, AgentMessage, MessageType
 from foundry.llm.factory import LLMProviderFactory
 from foundry.llm.base import LLMMessage
+from foundry.utils.parsing import extract_json_from_text
 from foundry.config import settings
 import logging
 
@@ -16,33 +17,18 @@ class ArchitectAgent(Agent):
     """
 
     def _extract_json(self, content: str) -> Dict[str, Any]:
-        """Robuster JSON extraction with outermost brace logic."""
-        # 1. Strip markdown fences if present
-        stripped = re.sub(r"^```(?:json)?\n?", "", content.strip(), flags=re.MULTILINE)
-        stripped = re.sub(r"\n?```$", "", stripped.strip(), flags=re.MULTILINE)
-        
-        # 2. Try direct load
-        try:
-            return json.loads(stripped.strip())
-        except json.JSONDecodeError:
-            # 3. Greedy match for outermost { ... }
-            match = re.search(r'(\{.*\})', stripped, re.DOTALL)
-            if match:
-                try:
-                    # Clean trailing commas
-                    cleaned = re.sub(r",\s*([}\]])", r"\1", match.group(1))
-                    return json.loads(cleaned)
-                except json.JSONDecodeError:
-                    pass
+        """Robuster JSON extraction using utility."""
+        parsed = extract_json_from_text(content)
+        if isinstance(parsed, dict):
+            return parsed
             
-            # 4. Last resort: simple regex for projectName
-            name_match = re.search(r'"project_name":\s*"([^"]+)"', stripped)
-            return {
-                "project_name": name_match.group(1) if name_match else "Architecture Draft",
-                "tech_stack": {"backend": "Target Framework", "language": "Target Language"},
-                "file_structure": {"src": ["main.py"]},
-                "raw_content": stripped[:500]
-            }
+        # Fallback if parsing fails
+        return {
+            "project_name": "Architecture Draft",
+            "tech_stack": {"backend": "Target Framework", "language": "Target Language"},
+            "file_structure": ["src/main.py"],
+            "raw_content": content[:500] if content else ""
+        }
 
     def _normalize_json(self, content: str) -> str:
         """Kept for backward internal compatibility; preferred _extract_json."""
@@ -68,12 +54,27 @@ class ArchitectAgent(Agent):
             language = message.payload.get("language", "python")
             framework = message.payload.get("framework", "")
             project_id = message.payload.get("project_id", "unknown")
+            feedback = message.payload.get("feedback", "")
+            existing_architecture = message.payload.get("existing_architecture", "")
             if not prd:
                 return None
-            return await self.design_architecture(prd, requirements, language, framework, project_id)
+            return await self.design_architecture(
+                prd, requirements, language, framework, project_id, 
+                existing_architecture=existing_architecture, 
+                feedback=feedback
+            )
         return None
 
-    async def design_architecture(self, prd_content: str, requirements: str = "", language: str = "python", framework: str = "", project_id: str = "unknown") -> AgentMessage:
+    async def design_architecture(
+        self, 
+        prd_content: str, 
+        requirements: str = "", 
+        language: str = "python", 
+        framework: str = "", 
+        project_id: str = "unknown",
+        existing_architecture: Any = None,
+        feedback: str = ""
+    ) -> AgentMessage:
         """
         Design system architecture based on PRD.
         """
@@ -120,9 +121,26 @@ class ArchitectAgent(Agent):
             "}"
         )
 
+        user_prompt = f"Design the architecture for the following PRD:\n\n{prd_content}"
+        
+        if feedback and existing_architecture:
+            user_prompt = f"""
+            The user has REJECTED the previous architecture design. 
+            Update the existing architecture based on the user's feedback.
+
+            USER FEEDBACK:
+            {feedback}
+
+            EXISTING ARCHITECTURE:
+            {json.dumps(existing_architecture, indent=2) if isinstance(existing_architecture, dict) else str(existing_architecture)}
+
+            PRD FOR CONTEXT:
+            {prd_content}
+            """
+
         messages = [
             LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=f"Design the architecture for the following PRD:\n\n{prd_content}")
+            LLMMessage(role="user", content=user_prompt)
         ]
 
         # Two-pass validation: self-correct once if the output looks wrong, then validate again

@@ -120,6 +120,7 @@ class EngineerAgent(Agent):
         - SEPARATION OF CONCERNS: Do NOT redefine models, schemas, or database logic already defined in other files. Import them instead.
         - CRITICAL: Every function MUST contain real implementation logic. Using 'pass', 'TODO', or empty function bodies is STRICTLY FORBIDDEN. If a function should perform arithmetic, it must contain the actual math. If a function should query a database, it must contain the actual query code.
         - COMPLETENESS CHECK: Before finishing each file, verify that EVERY function has a return statement or produces a side-effect. No function should be a no-op.
+        - SYNTAX CHECK: Ensure the code is syntactically correct for {language}. Verify all 'if', 'for', 'while', 'def', and 'class' blocks are properly indented and have a body.
 
         {project_manifest}
         
@@ -549,7 +550,7 @@ class EngineerAgent(Agent):
                     # Inject up to 800 chars of each file for signature/model visibility
                     truncated = prev_content[:800]
                     if len(prev_content) > 800:
-                        truncated += "\n    # ... [truncated]"
+                        truncated += "\n    # [SYSTEM NOTE: Rest of file truncated for context brevity]"
                     context_str += f"--- {prev_file} ---\n{truncated}\n\n"
 
         code = await self._request_code_generation(
@@ -619,6 +620,17 @@ class EngineerAgent(Agent):
                     first_idx = clean_content.find(block) + len(block)
                     clean_content = clean_content[:first_idx] + "\n# [TRUNCATED DUE TO REPETITION LOOP]\n"
                     break
+        
+        # 5. TRUNCATION LEAKAGE FIX: Remove accidental copy-pasted system truncation markers
+        clean_content = re.sub(r'# \.* \[truncated\]', '', clean_content, flags=re.IGNORECASE)
+        clean_content = re.sub(r'# \[SYSTEM NOTE: .*\]', '', clean_content, flags=re.IGNORECASE)
+        
+        # Final trim
+        clean_content = clean_content.strip()
+        
+        # Safety check: if we removed a block and left a trailing ':', add a 'pass'
+        if clean_content.endswith(':'):
+            clean_content += "\n    pass"
 
         return clean_content
 

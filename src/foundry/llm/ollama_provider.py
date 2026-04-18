@@ -64,6 +64,7 @@ class OllamaProvider(BaseLLMProvider):
         messages: List[LLMMessage],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
+        json_mode: bool = False,
         **kwargs: Any
     ) -> LLMResponse:
         """Generate completion from messages.
@@ -89,11 +90,14 @@ class OllamaProvider(BaseLLMProvider):
             "stream": False,
             "options": {
                 "temperature": temperature,
-                "num_ctx": 4096,  # Reduced for speed on local hardware
+                "num_ctx": 8192,  # Increased for larger projects
                 "num_thread": 4,  # More stable default
                 "num_predict": 2048, # Prevent runaway generation
             }
         }
+        
+        if json_mode:
+            payload["format"] = "json"
         
         if max_tokens:
             payload["options"]["num_predict"] = max_tokens

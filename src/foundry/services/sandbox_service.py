@@ -59,6 +59,14 @@ class SandboxService:
         image = self.image_map.get(language.lower(), "python:3.11-slim")
         exec_cmd = command or self.default_commands.get(language.lower(), "python main.py")
         
+        # Check for host path configuration in Dockerized environments
+        from foundry.config import settings
+        if os.path.exists("/.dockerenv") and not settings.host_generated_projects_path:
+            logger.warning(
+                "RUNNING IN DOCKER: 'HOST_GENERATED_PROJECTS_PATH' is not set. "
+                "Docker volume mounting may fail if the host path is different from the container path."
+            )
+        
         container_name = f"foundry-sandbox-{project_id[:8]}-{int(time.time())}"
         
         # Construct the docker command

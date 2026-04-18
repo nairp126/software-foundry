@@ -29,6 +29,7 @@ from foundry.services.knowledge_graph import KnowledgeGraphService
 from foundry.graph.ingestion import ingestion_pipeline
 from foundry.config import settings
 from foundry.services.agent_control import agent_control_service
+from foundry.utils.parsing import extract_json_from_text, parse_agent_response
 
 
 class AgentControlInterrupt(Exception):
@@ -163,14 +164,24 @@ class AgentOrchestrator:
 
     async def _publish_status_update(self, project_id: str, status: ProjectStatus, message: str = ""):
         """Publish status update to Redis for real-time WebSocket broadcasting."""
+        await self._publish_event(
+            project_id=project_id,
+            event_type="status_update",
+            data={
+                "status": status.value,
+                "message": message
+            }
+        )
+
+    async def _publish_event(self, project_id: str, event_type: str, data: Dict[str, Any]):
+        """Publish a generic event to Redis for real-time frontend consumption."""
         from foundry.redis_client import redis_client
         if redis_client.is_connected:
             event_data = {
-                "type": "status_update",
-                "status": status.value,
+                "type": event_type,
                 "project_id": project_id,
-                "message": message,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.utcnow().isoformat(),
+                **data
             }
             channel = f"foundry:project:{project_id}"
             await redis_client.client.publish(channel, json.dumps(event_data))
@@ -181,6 +192,7 @@ class AgentOrchestrator:
         await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_pm)
         await self._publish_status_update(project_id, ProjectStatus.running_pm, "Starting requirements analysis...")
+        await self._publish_event(project_id, "agent_thought", {"agent": "ProductManager", "thought": "I am analyzing the user's requirements to create a comprehensive PRD."})
         
         # PRE-SEED KG WITH PROJECT NODE (Critical for relational linking)
         try:
@@ -254,9 +266,13 @@ class AgentOrchestrator:
         await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_architect)
         await self._publish_status_update(project_id, ProjectStatus.running_architect, "Designing system architecture...")
+        await self._publish_event(project_id, "agent_thought", {"agent": "Architect", "thought": "Designing system architecture and modular file structures based on the PRD."})
         
         prd = state["project_context"].get("prd", "")
-        requirements = state.get("requirements", "") # Fix L
+        requirements = state["project_context"].get("requirements", "") or state.get("requirements", "")
+        feedback = state["project_context"].get("architect_feedback", "")
+        existing_architecture = state["project_context"].get("architecture", "")
+
         message = AgentMessage(
             sender=AgentType.PRODUCT_MANAGER,
             recipient=AgentType.ARCHITECT,
@@ -267,6 +283,8 @@ class AgentOrchestrator:
                 "language": state.get("language", "python"),
                 "framework": state.get("framework", ""),
                 "project_id": state["project_id"],
+                "feedback": feedback,
+                "existing_architecture": existing_architecture
             }
         )
         
@@ -321,6 +339,7 @@ class AgentOrchestrator:
         await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_engineer)
         await self._publish_status_update(project_id, ProjectStatus.running_engineer, "Generating codebase...")
+        await self._publish_event(project_id, "agent_thought", {"agent": "Engineer", "thought": "Starting code generation iteration. Focusing on implementing core business logic and structural components."})
         
         architecture = state["project_context"].get("architecture", "")
         prd = state["project_context"].get("prd", "")
@@ -405,7 +424,7 @@ class AgentOrchestrator:
             # while ensuring the final graph has no duplicates
             try:
                 from foundry.services.knowledge_graph import knowledge_graph_service
-                await knowledge_graph_service.connect()
+                await knowledge_graph_service.client.connect()
                 await knowledge_graph_service.clear_project(state["project_id"])
                 logger.info(f"Cleared stale KG data for project {state['project_id']} before re-ingestion")
             except Exception as e:
@@ -438,6 +457,7 @@ class AgentOrchestrator:
         await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_code_review)
         await self._publish_status_update(project_id, ProjectStatus.running_code_review, "Analyzing generated code...")
+        await self._publish_event(project_id, "agent_thought", {"agent": "CodeReview", "thought": "Performing structural analysis and security audit of the generated files."})
 
         code_repo = state["project_context"].get("code_repo", {})
         language = state.get("language", "python")
@@ -486,6 +506,7 @@ class AgentOrchestrator:
         await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_reflexion)
         await self._publish_status_update(project_id, ProjectStatus.running_reflexion, "Starting self-healing loop...")
+        await self._publish_event(project_id, "agent_thought", {"agent": "Reflexion", "thought": "Executing code in sandbox to detect and repair runtime errors automatically."})
         
         code_repo = state["project_context"].get("code_repo", {})
         language = state.get("language", "python")
@@ -537,7 +558,10 @@ class AgentOrchestrator:
         
         response = await self.reflexion_agent.process_message(message)
         reflexion_fix = response.payload.get("fix_plan", "") if response else ""
-        updated_code_repo = response.payload.get("code_repo", code_repo) if response else code_repo
+        # Fix: Support both code_repo and code keys for robustness
+        updated_code_repo = code_repo
+        if response and response.payload:
+            updated_code_repo = response.payload.get("code_repo") or response.payload.get("code") or code_repo
         
         return {
             "messages": [AIMessage(content=f"Reflexion analysis complete. Execution success: {execution_results['success']}")],
@@ -558,6 +582,7 @@ class AgentOrchestrator:
         await self._check_control(project_id)
         await self._update_project_status(project_id, ProjectStatus.running_devops)
         await self._publish_status_update(project_id, ProjectStatus.running_devops, "Preparing deployment configuration...")
+        await self._publish_event(project_id, "agent_thought", {"agent": "DevOps", "thought": "Generating container configuration and CI/CD manifests for the project."})
         
         code_repo = state["project_context"].get("code_repo", {})
         architecture = state["project_context"].get("architecture", "")
@@ -762,19 +787,6 @@ class AgentOrchestrator:
             raise
         except Exception as e:
             logger.warning(f"Error checking control status for {project_id}: {e}")
-        """Update project status in database."""
-        async with AsyncSessionLocal() as session:
-            try:
-                result = await session.execute(
-                    select(Project).where(Project.id == project_id)
-                )
-                project = result.scalar_one_or_none()
-                if project:
-                    project.status = status
-                    await session.commit()
-            except Exception as e:
-                logger.error(f"Failed to update project status: {e}")
-                await session.rollback()
 
     async def _log_execution(
         self,
@@ -807,16 +819,14 @@ class AgentOrchestrator:
         """Safely parse a field into a dictionary if it is a JSON string."""
         if not field_value:
             return None
+        if isinstance(field_value, dict):
+            return field_value
         if isinstance(field_value, str):
-            try:
-                # Basic cleaning of markdown backticks if present
-                cleaned = field_value.replace("```json", "").replace("```", "").strip()
-                if not cleaned:
-                    return None
-                return json.loads(cleaned)
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse JSON field: {field_value[:100]}...")
-                return None
+            parsed = extract_json_from_text(field_value)
+            if parsed is None:
+                logger.error(f"CRITICAL: Failed to parse JSON field for project {self.project_id if hasattr(self, 'project_id') else 'unknown'}.")
+                logger.debug(f"RAW OUTPUT: {field_value}")
+            return parsed
         return field_value
 
     async def _store_artifact(self, project_id: str, name: str, content: str, artifact_type: ArtifactType, language: str = "python"):
@@ -893,11 +903,16 @@ class AgentOrchestrator:
         # Read lang, framework, prd, arch from the project record
         project_language = "python"
         project_framework = ""
+        project_language = "python"
+        project_framework = ""
         project_prd = ""
         project_architecture = ""
+        project_requirements = ""
+        feedback = ""
         
         async with AsyncSessionLocal() as session:
             try:
+                # 1. Load project data
                 result = await session.execute(
                     select(Project).where(Project.id == project_id)
                 )
@@ -907,18 +922,37 @@ class AgentOrchestrator:
                     project_framework = getattr(project, "framework", "") or ""
                     project_prd = getattr(project, "prd", "") or ""
                     project_architecture = getattr(project, "architecture", "") or ""
+                    project_requirements = getattr(project, "requirements", "") or ""
+                
+                # 2. Load latest rejection feedback if resuming for iteration
+                from foundry.models.approval import ApprovalRequest, ApprovalStatus
+                import uuid
+                rejection_result = await session.execute(
+                    select(ApprovalRequest).where(
+                        ApprovalRequest.project_id == uuid.UUID(project_id),
+                        ApprovalRequest.status == ApprovalStatus.rejected
+                    ).order_by(ApprovalRequest.created_at.desc())
+                )
+                rejection = rejection_result.scalar_one_or_none()
+                if rejection:
+                    feedback = rejection.reviewer_comment or ""
+                    logger.info(f"Loaded rejection feedback for project {project_id}: {feedback[:50]}...")
+                    
             except Exception as e:
-                logger.warning(f"Could not read project data: {e}")
+                logger.warning(f"Could not read project data for resume: {e}")
 
         # Ensure we have a mock prompt if resuming without one
-        safe_prompt = initial_prompt if initial_prompt else "Resume execution"
+        safe_prompt = initial_prompt if initial_prompt else (project_requirements or "Resume execution")
+        self.project_id = project_id # Fix: Ensure self.project_id is available for logging
         
         initial_state = {
             "messages": [HumanMessage(content=safe_prompt)],
             "current_agent": "product_manager",
             "project_context": {
                 "prd": project_prd,
-                "architecture": project_architecture
+                "architecture": project_architecture,
+                "requirements": project_requirements,
+                "architect_feedback": feedback
             },
             "review_feedback": {},
             "project_id": project_id,
@@ -949,7 +983,18 @@ class AgentOrchestrator:
                     except Exception as e:
                         logger.warning(f"Failed to log execution: {e}")
                         
-                    final_state = {**final_state, **value}
+                    # Fix: Robust State Merging for history preservation
+                    for field, val in value.items():
+                        if field == "messages" and isinstance(val, list):
+                            if "messages" not in final_state:
+                                final_state["messages"] = []
+                            final_state["messages"].extend(val)
+                        elif field == "project_context" and isinstance(val, dict):
+                            if "project_context" not in final_state:
+                                final_state["project_context"] = {}
+                            final_state["project_context"].update(val)
+                        else:
+                            final_state[field] = val
                 last_yield_time = current_time
                 
             logger.critical(f"GRAPH ASTREAM COMPLETED. FINAL STATE SUCCESS FLAG: {final_state.get('success_flag')}")
