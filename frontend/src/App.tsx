@@ -40,18 +40,31 @@ const AgentIcon = ({ agent, size = 20 }: { agent: string, size?: number }) => {
   }
 };
 
-const PipelineStep = ({ label, active, completed }: { label: string, active: boolean, completed: boolean }) => (
-  <div className="flex flex-col items-center gap-2 flex-1 relative">
+const PipelineStep = ({ label, active, completed, agent }: { label: string, active: boolean, completed: boolean, agent: string }) => (
+  <div className="flex flex-col items-center gap-2 relative z-10">
     <div className={cn(
-      "w-10 h-10 rounded-full flex items-center justify-center border-2 transition-all duration-500",
-      active ? "border-cyan-500 bg-cyan-500/20 shadow-[0_0_15px_rgba(6,182,212,0.5)]" : 
-      completed ? "border-emerald-500 bg-emerald-500/20" : "border-slate-800 bg-slate-900"
+      "w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all duration-700",
+      active ? "border-cyan-500 bg-cyan-500/20 shadow-[0_0_20px_rgba(6,182,212,0.4)] scale-110" : 
+      completed ? "border-emerald-500 bg-emerald-500/10" : "border-slate-800 bg-slate-900/50"
     )}>
-      {completed ? <CheckCircle2 size={20} className="text-emerald-500" /> : <Activity size={20} className={active ? "text-cyan-400 animate-pulse" : "text-slate-600"} />}
+      {completed ? <CheckCircle2 size={24} className="text-emerald-500" /> : <AgentIcon agent={agent} size={24} />}
     </div>
-    <span className={cn("text-xs font-medium uppercase tracking-wider", active ? "text-cyan-400" : completed ? "text-emerald-500" : "text-slate-500")}>
-      {label}
-    </span>
+    <span className={cn(
+      "text-[10px] font-bold uppercase tracking-[0.2em] transition-colors duration-500",
+      active ? "text-cyan-400" : completed ? "text-emerald-500/70" : "text-slate-600"
+    )}>{label}</span>
+  </div>
+);
+
+const PipelineConnector = ({ active, completed }: { active: boolean, completed: boolean }) => (
+  <div className="flex-1 h-[2px] bg-slate-800/50 mx-[-4px] mb-6 relative overflow-hidden min-w-[30px]">
+    <div className={cn(
+      "absolute inset-0 bg-gradient-to-r from-emerald-500 via-cyan-500 to-blue-500 transition-all duration-1000",
+      completed ? "translate-x-0 opacity-100" : active ? "animate-flow opacity-60" : "-translate-x-full opacity-0"
+    )} />
+    {active && (
+      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-flow" style={{ animationDuration: '1.5s' }} />
+    )}
   </div>
 );
 
@@ -109,8 +122,8 @@ function App() {
                 <span className="text-[10px] text-slate-500 font-mono tracking-tighter uppercase">ID: {projectId.slice(0, 8)}...</span>
               </div>
               <div className="flex items-center gap-2 px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full">
-                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-xs text-emerald-400 font-medium uppercase tracking-wider">Live</span>
+                <div className={cn("w-2 h-2 rounded-full bg-emerald-500", status !== 'completed' && "animate-pulse")} />
+                <span className="text-xs text-emerald-400 font-medium uppercase tracking-wider">{status === 'completed' ? 'Ready' : 'Live'}</span>
               </div>
             </div>
           )}
@@ -124,14 +137,39 @@ function App() {
         
         {/* Step Visualizer Panel (Left/Full) */}
         <div className="col-span-12 flex flex-col gap-6">
-           <section className="glass rounded-2xl p-6 flex justify-between items-center relative overflow-hidden">
+           <section className="glass rounded-2xl p-8 flex items-center relative overflow-hidden">
             <div className="absolute top-0 right-0 w-64 h-64 bg-cyan-500/5 blur-[100px] -z-10" />
-            <PipelineStep label="PM" active={status === 'running_pm'} completed={['running_architect', 'running_engineer', 'running_code_review', 'running_reflexion', 'running_devops', 'completed'].includes(status)} />
-            <PipelineStep label="Architect" active={status === 'running_architect' || status === 'paused'} completed={['running_engineer', 'running_code_review', 'running_reflexion', 'running_devops', 'completed'].includes(status)} />
-            <PipelineStep label="Engineer" active={status === 'running_engineer'} completed={['running_code_review', 'running_reflexion', 'running_devops', 'completed'].includes(status)} />
-            <PipelineStep label="Review" active={status === 'running_code_review'} completed={['running_reflexion', 'running_devops', 'completed'].includes(status)} />
-            <PipelineStep label="Reflexion" active={status === 'running_reflexion'} completed={['running_devops', 'completed'].includes(status)} />
-            <PipelineStep label="DevOps" active={status === 'running_devops'} completed={status === 'completed'} />
+            
+            <PipelineStep agent="ProductManager" label="PM" active={status === 'running_pm'} completed={['running_architect', 'running_engineer', 'running_code_review', 'running_reflexion', 'running_devops', 'completed'].includes(status)} />
+            <PipelineConnector active={status === 'running_pm'} completed={['running_architect', 'running_engineer', 'running_code_review', 'running_reflexion', 'running_devops', 'completed'].includes(status)} />
+            
+            <PipelineStep agent="Architect" label="Architect" active={status === 'running_architect' || status === 'paused'} completed={['running_engineer', 'running_code_review', 'running_reflexion', 'running_devops', 'completed'].includes(status)} />
+            <PipelineConnector active={status === 'running_architect'} completed={['running_engineer', 'running_code_review', 'running_reflexion', 'running_devops', 'completed'].includes(status)} />
+            
+            <PipelineStep agent="Engineer" label="Engineer" active={status === 'running_engineer'} completed={['running_code_review', 'running_reflexion', 'running_devops', 'completed'].includes(status)} />
+            <PipelineConnector active={status === 'running_engineer'} completed={['running_code_review', 'running_reflexion', 'running_devops', 'completed'].includes(status)} />
+            
+            <PipelineStep agent="CodeReview" label="Review" active={status === 'running_code_review'} completed={['running_reflexion', 'running_devops', 'completed'].includes(status)} />
+            <PipelineConnector active={status === 'running_code_review'} completed={['running_reflexion', 'running_devops', 'completed'].includes(status)} />
+            
+            <PipelineStep agent="Reflexion" label="Reflexion" active={status === 'running_reflexion'} completed={['running_devops', 'completed'].includes(status)} />
+            <PipelineConnector active={status === 'running_reflexion'} completed={['running_devops', 'completed'].includes(status)} />
+            
+            <PipelineStep agent="DevOps" label="DevOps" active={status === 'running_devops'} completed={status === 'completed'} />
+            <PipelineConnector active={status === 'running_devops'} completed={status === 'completed'} />
+
+            <div className="flex flex-col items-center gap-2 relative z-10">
+              <div className={cn(
+                "w-12 h-12 rounded-full flex items-center justify-center border-2 transition-all duration-1000",
+                status === 'completed' ? "border-cyan-400 bg-cyan-400/20 shadow-[0_0_30px_rgba(34,211,238,0.6)]" : "border-slate-800 bg-slate-900/50"
+              )}>
+                <Rocket size={24} className={status === 'completed' ? "text-cyan-400" : "text-slate-600"} />
+              </div>
+              <span className={cn(
+                "text-[10px] font-bold uppercase tracking-[0.2em]",
+                status === 'completed' ? "text-cyan-400" : "text-slate-600"
+              )}>Finished</span>
+            </div>
           </section>
 
           {status === 'completed' && (
