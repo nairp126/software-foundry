@@ -154,8 +154,8 @@ class AgentOrchestrator:
             }
         )
 
-        # From reflexion back to engineer for fixing
-        workflow.add_edge("reflexion", "engineer")
+        # From reflexion back to code_review to verify the applied fixes
+        workflow.add_edge("reflexion", "code_review")
 
         # End after devops
         workflow.add_edge("devops", END)
@@ -440,6 +440,11 @@ class AgentOrchestrator:
         except Exception as e:
             logger.error(f"Early KG ingestion failed: {e}")
 
+        # Discover entry point dynamically
+        from foundry.tools.import_resolver import ImportResolver
+        resolved_entry = ImportResolver.discover_entry_point(code_repo)
+        logger.info(f"Resolved entry point: {resolved_entry}")
+
         return {
             "messages": [AIMessage(content=f"Code generated for {len(code_repo)} files.")],
             "project_context": {
@@ -447,7 +452,7 @@ class AgentOrchestrator:
                 "code_repo": code_repo, 
                 "architecture": architecture, 
                 "prd": prd,
-                "entry_point": payload["entry_point"]
+                "entry_point": resolved_entry
             }
         }
 
@@ -521,11 +526,14 @@ class AgentOrchestrator:
         base_path = settings.host_generated_projects_path or os.path.abspath(settings.generated_projects_path)
         project_host_path = os.path.join(base_path, project_id)
         
-        logger.info(f"Running sandbox execution for project {project_id}")
+        entry_point = state["project_context"].get("entry_point", "main.py")
+        
+        logger.info(f"Running sandbox execution for project {project_id} with entry point {entry_point}")
         execution_results = await sandbox_service.execute_project(
             project_id=project_id,
             project_path=project_host_path,
-            language=language
+            language=language,
+            entry_point=entry_point
         )
         
         # Use "feedback" instead of "comments" (BUG-ORCH-2)
@@ -552,7 +560,9 @@ class AgentOrchestrator:
                 "feedback": enriched_feedback,
                 "issues": state["review_feedback"].get("issues", []),
                 "project_id": project_id,
-                "execution_results": execution_results
+                "execution_results": execution_results,
+                "entry_point": entry_point,
+                "language": language
             }
         )
         
@@ -636,6 +646,10 @@ class AgentOrchestrator:
         """Route the workflow based on code review results."""
         review = state["review_feedback"]
         
+        # Force sandbox execution at least once to ensure real execution feedback
+        if state.get("reflexion_count", 0) == 0:
+            return "fix"
+            
         if review.get("approved", False):
             return "approve"
         

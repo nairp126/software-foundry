@@ -15,6 +15,13 @@ class CodeReviewAgent(Agent):
         super().__init__(AgentType.CODE_REVIEW, model_name)
         self.llm = LLMProviderFactory.create_provider(model_name=self.model_name)
         self.quality_gates = QualityGates()
+        
+        # Knowledge Graph integration for semantic validation
+        try:
+            from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
+            self.kg_tools = KnowledgeGraphTools()
+        except ImportError:
+            self.kg_tools = None
 
     async def process_message(self, message: AgentMessage) -> AgentMessage:
         if message.message_type == MessageType.TASK:
@@ -97,6 +104,21 @@ class CodeReviewAgent(Agent):
                 for issue in gate_results.security_issues:
                     dynamic_context += f"- [{issue.severity.value.upper()}] {issue.file}:{issue.line}: {issue.description}\n"
 
+        # Step 2b: Semantic validation (Fix: Hallucinated dependencies)
+        kg_semantic_context = ""
+        if self.kg_tools:
+            try:
+                # Retrieve the full graph of definitions to check for missing nodes
+                await self.kg_tools.connect()
+                graph_summary = await self.kg_tools.get_project_summary_for_generation(project_id)
+                if graph_summary:
+                    kg_semantic_context = f"\n\nSEMANTIC GROUND TRUTH (Existing Definitions in KG):\n{graph_summary}\n"
+                    kg_semantic_context += "CRITICAL: If the code calls a function or class NOT in this list and NOT in the standard library, it is a HALLUCINATION. You MUST reject it.\n"
+            except Exception as e:
+                logger.warning(f"Semantic KG check failed: {e}")
+            finally:
+                await self.kg_tools.disconnect()
+
         system_prompt = f"""You are an expert Senior Software Engineer and Security Auditor.
         Review the provided {language} code files.
 
@@ -104,6 +126,9 @@ class CodeReviewAgent(Agent):
         1. Correctness: Does it look like it works? Are there logic errors?
         2. Security: Are there hardcoded secrets, injection vulnerabilities, or other risks specific to {language}?
         3. Style: Is the code clean, readable, and follows {language} best practices?
+        4. Semantic Integrity: Verify that all internal function calls reference actual definitions.
+        
+        {kg_semantic_context}
 
         {dynamic_context}
 

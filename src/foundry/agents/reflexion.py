@@ -369,10 +369,16 @@ class ReflexionEngine(Agent):
             logger.warning("_apply_fix_plan_to_repo: fix_plan['files'] is not a dict, skipping patch")
             return updated_repo
         
+        from foundry.utils.code_fixer import apply_deterministic_fixes
+        
         for file_path, new_content in files_to_patch.items():
             if not isinstance(file_path, str) or not isinstance(new_content, str):
                 logger.warning(f"_apply_fix_plan_to_repo: skipping unparseable entry for {file_path!r}")
                 continue
+            
+            # Apply deterministic fixes to ensure Reflexion doesn't break boilerplate
+            new_content = apply_deterministic_fixes(new_content, file_path)
+            
             updated_repo[file_path] = new_content
             logger.debug(f"_apply_fix_plan_to_repo: patched {file_path}")
         
@@ -416,22 +422,59 @@ class ReflexionEngine(Agent):
                 logger.info(f"Resolved entry point from {entry_point} to {resolved_entry}")
                 entry_point = resolved_entry
 
+        # Ensure quality tools are available for Python reflexion
+        if language == "python":
+            if not dependencies: dependencies = []
+            for tool in ["bandit", "vulture"]:
+                if tool not in dependencies: dependencies.append(tool)
+
         while attempt < self.MAX_RETRY_ATTEMPTS:
             attempt += 1
             logger.info(f"Execution attempt {attempt}/{self.MAX_RETRY_ATTEMPTS}")
             
-            # 2. Execute code (Main Entry Point)
-            result = await self.execute_code(current_repo, self.sandbox_env, language, entry_point, dependencies)
-            
-            # 3. New: Run tests if available (Fix: Quality Gap 5)
-            test_files = [f for f in current_repo.keys() if f.startswith("tests/") and f.endswith(".py")]
-            if result.success and test_files and language == "python":
-                logger.info(f"Entry point {entry_point} ran successfully. Running {len(test_files)} tests via pytest...")
-                test_result = await self.execute_code(current_repo, self.sandbox_env, language, "pytest", dependencies)
-                if not test_result.success:
-                    logger.warning("Main execution passed but tests failed. Triggering fix for logic.")
-                    result = test_result
-                    result.stderr = f"TEST FAILURES DETECTED:\n{test_result.stdout}\n{test_result.stderr}"
+            # Create a dedicated sandbox for this attempt to run multiple tools efficiently
+            sandbox = await self.sandbox_env.create_sandbox(language, dependencies)
+            try:
+                # 1. Main Execution
+                result = await self.sandbox_env.execute_code(sandbox, code_repo=current_repo, entry_point=entry_point)
+                
+                # 2. Pytest (if main passes)
+                test_files = [f for f in current_repo.keys() if f.startswith("tests/") and f.endswith(".py")]
+                if result.success and test_files and language == "python":
+                    logger.info("Main execution passed. Running tests...")
+                    test_result = await self.sandbox_env.execute_code(sandbox, command="python -m pytest tests/ --tb=short")
+                    if not test_result.success:
+                        logger.warning("Tests failed. Triggering fix.")
+                        result = test_result
+                        result.stderr = f"TEST FAILURES DETECTED:\n{test_result.stdout}\n{test_result.stderr}"
+
+                # 3. Security Scan (Bandit)
+                if result.success and language == "python":
+                    logger.info("Running security scan (Bandit)...")
+                    bandit_result = await self.sandbox_env.execute_code(sandbox, command="bandit -r . -f json")
+                    try:
+                        bandit_data = json.loads(bandit_result.stdout)
+                        high_issues = [i for i in bandit_data.get("results", []) if i["issue_severity"] == "HIGH"]
+                        if high_issues:
+                            logger.warning(f"Security vulnerabilities found: {len(high_issues)}")
+                            result.success = False
+                            details = "\n".join([f"- {i['issue_text']} (Line {i['line_number']} in {i['filename']})" for i in high_issues[:5]])
+                            result.stderr = f"SECURITY VULNERABILITY DETECTED:\n{details}\nYou must refactor to remove these high-severity risks."
+                    except: pass
+
+                # 4. Dead Code Scan (Vulture)
+                if result.success and language == "python":
+                    logger.info("Running dead code scan (Vulture)...")
+                    vulture_result = await self.sandbox_env.execute_code(sandbox, command="vulture .")
+                    dead_items = [l for l in vulture_result.stdout.splitlines() if l.strip()]
+                    if len(dead_items) > 20:
+                        logger.warning(f"Dead code threshold exceeded: {len(dead_items)}")
+                        result.success = False
+                        result.stderr = f"DEAD CODE THRESHOLD EXCEEDED ({len(dead_items)} items found).\n" + \
+                                        "Please remove unused imports, functions, or variables to improve maintainability."
+            finally:
+                await self.sandbox_env.cleanup_sandbox(sandbox)
+
             execution_history.append({
                 "attempt": attempt,
                 "success": result.success,
@@ -439,9 +482,9 @@ class ReflexionEngine(Agent):
                 "execution_time": result.execution_time,
             })
             
-            # Check if execution succeeded
+            # Check if execution (including quality gates) succeeded
             if result.success:
-                # COMPLETENESS CHECK: Detect stub functions that "pass" syntax checks but are empty
+                # COMPLETENESS CHECK: Detect stub functions
                 stub_files = self._find_stub_files(current_repo, language)
                 if not stub_files:
                     logger.info("Code executed successfully!")
@@ -502,21 +545,81 @@ class ReflexionEngine(Agent):
             if feedback:
                 error_context += f"\nAdditional Context: {feedback}"
 
-            # Step 4: Generate a structured Fix Plan for the WHOLE REPO (HIGH-REFX-1)
+            # Step 4: Generate a structured Fix Plan
+            
+            error_file = None
+            for file in current_repo:
+                if file in analysis.error_message or file in analysis.root_cause:
+                    error_file = file
+                    break
+            if not error_file:
+                for file in current_repo:
+                    if file.endswith('.py') and not file.startswith('test'):
+                        error_file = file
+                        break
+            if not error_file and current_repo:
+                error_file = list(current_repo.keys())[0]
+
+            # Before generating a new fix, check KG for historical fixes
+            historical_fix_applied = False
+            if self.kg_tools:
+                try:
+                    from foundry.services.knowledge_graph import knowledge_graph_service
+                    historical_fix = await knowledge_graph_service.get_error_fix(
+                        error_type=analysis.error_type,
+                        error_message=analysis.error_message,
+                        language=language
+                    )
+                    if historical_fix and error_file:
+                        logger.info(f"Found historical fix in KG for {analysis.error_type}")
+                        # Apply the cached fix directly, skip LLM call
+                        fix_plan_dict = {"files": {error_file: historical_fix}, "explanation": "Applied cached KG fix"}
+                        current_repo = self._apply_fix_plan_to_repo(current_repo, fix_plan_dict)
+                        historical_fix_applied = True
+                        continue  # Skip to next execution attempt
+                except Exception as e:
+                    logger.warning(f"KG historical fix lookup failed: {e}")
+            
+            if historical_fix_applied:
+                continue
+
+            surgical_context = ""
+            if self.kg_tools and error_file:
+                try:
+                    # Get only the imports/dependencies of the broken file from KG
+                    dep_context = await self.kg_tools.get_component_context(
+                        project_id=project_id,
+                        component_name=os.path.splitext(os.path.basename(error_file))[0]
+                    )
+                    if dep_context:
+                        surgical_context = self.kg_tools.format_for_llm(dep_context)
+                except Exception as e:
+                    logger.warning(f"KG surgical context failed: {e}")
+
             system_prompt = f"""You are a Lead Software Engineer. Resolve the following {language} execution error.
             
             Respond ONLY with a JSON fix plan in this format:
             {{
                 "files": {{
-                    "filename.py": "...full corrected file content..."
+                    "{error_file or 'filename.py'}": "...full corrected file content..."
                 }},
                 "explanation": "Short summary of the changes"
             }}
             """
             
+            other_files = [f for f in current_repo if f != error_file]
+            other_files_summary = ", ".join(other_files) if other_files else "None"
+            
             user_prompt = f"""
-            Current Project Files:
-            {json.dumps(current_repo, indent=2)}
+            File that needs fixing: {error_file}
+            ```python
+            {current_repo.get(error_file, "") if error_file else ""}
+            ```
+            
+            Other project files: {other_files_summary}
+            
+            KG Dependency Context:
+            {surgical_context}
             
             Execution Failure:
             {error_context}
@@ -556,8 +659,13 @@ class ReflexionEngine(Agent):
                 
             except Exception as e:
                 logger.error(f"Failed to apply reflexion fix plan: {e}")
-                # If we fail to parse, we exit this cycle so orchestrator can retry or move on
-                break
+                # FALLBACK: Try to extract code from markdown fences
+                code_match = re.search(r'```(?:python)?\n(.*?)```', response.content, re.DOTALL)
+                if code_match and error_file:
+                    logger.info("JSON failed but extracted code from markdown. Applying directly.")
+                    current_repo[error_file] = code_match.group(1).strip()
+                else:
+                    break  # No recovery possible
 
         # Max retries exceeded or parsing error
         return AgentMessage(
@@ -616,6 +724,13 @@ class ReflexionEngine(Agent):
         Your job is to:
         1. Analyze the feedback and issues reported.
         2. Produce a JSON fix plan describing the corrected file contents.
+        
+        COMMON ARCHITECTURAL FIXES:
+        - Missing Imports: If you see a NameError (e.g. 'Base', 'sessionmaker', 'Column'), you MUST add the missing imports.
+        - FastAPI response_model: SQLAlchemy models CANNOT be used directly as response_models. You MUST define a Pydantic schema (inheriting from BaseModel) for the response.
+        - Database Initialization: Ensure Base.metadata.create_all(engine) is called to initialize tables.
+        - Indentation: Ensure all function bodies have at least one statement (use 'pass' if empty).
+        - ANTI-MIMICRY: Do NOT use comments like "# [SYSTEM NOTE: ...]" or "# Rest of file truncated...". These are system markers, not code. You MUST provide the FULL content of the file you are fixing.
         
         Respond ONLY with a JSON object in this exact shape:
         {

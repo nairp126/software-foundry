@@ -152,7 +152,7 @@ class ArchitectAgent(Agent):
                 # Use robust extraction
                 arch_dict = self._extract_json(architecture_content)
                 # Schema Validation & Auto-fix
-                arch_dict = self._validate_and_fix_arch_schema(arch_dict, language, web_framework)
+                arch_dict = self._validate_and_fix_arch_schema(arch_dict, language, web_framework, prd_content)
                 architecture_content = json.dumps(arch_dict, indent=2)
                 break
             except Exception:
@@ -220,20 +220,79 @@ class ArchitectAgent(Agent):
         """Node for Architect agent. Kept for LangGraph."""
         return {}
 
-    def _validate_and_fix_arch_schema(self, arch: Dict[str, Any], language: str, framework: str) -> Dict[str, Any]:
+    def _validate_and_fix_arch_schema(self, arch: Dict[str, Any], language: str, framework: str, prd_content: str = "") -> Dict[str, Any]:
         """Ensures the architecture has critical fields for the engineer."""
         required_fields = {
             "high_level_design": "Standard monolothic architecture",
             "tech_stack": {"language": language, "framework": framework},
             "data_model": [],
             "api_endpoints": [],
-            "file_structure": []
+            "file_structure": [],
+            "required_imports": {}
         }
         
         for field, default in required_fields.items():
             if field not in arch or not arch[field]:
                 arch[field] = default
         
+        # Inject framework-specific guardrails (Fix: Execution Success Rate)
+        if language.lower() == "python":
+            fw = framework.lower() if framework else ""
+            arch_lower = str(arch).lower()
+            
+            # Smart framework detection fallback
+            if not fw:
+                if "fastapi" in arch_lower or "fastapi" in prd_content.lower():
+                    fw = "fastapi"
+                elif "flask" in arch_lower or "flask" in prd_content.lower():
+                    fw = "flask"
+                
+                # Check tech_stack
+                tech = arch.get("tech_stack", {})
+                if isinstance(tech, dict):
+                    tech_fw = tech.get("framework", "").lower()
+                    if tech_fw:
+                        fw = tech_fw
+            
+            # Common file mappings to avoid path mismatches
+            def get_req_imports(fname):
+                if fname not in arch["required_imports"]:
+                    arch["required_imports"][fname] = []
+                return arch["required_imports"][fname]
+
+            if "fastapi" in fw:
+                get_req_imports("main.py").extend([
+                    "from fastapi import FastAPI, HTTPException, Depends",
+                    "from pydantic import BaseModel",
+                    "import uvicorn"
+                ])
+                # Fix p07/p08: Ensure database.py has Base
+                get_req_imports("database.py").extend([
+                    "from sqlalchemy import create_engine, Column, Integer, String",
+                    "from sqlalchemy.ext.declarative import declarative_base",
+                    "from sqlalchemy.orm import sessionmaker",
+                    "Base = declarative_base()"
+                ])
+                get_req_imports("models.py").extend([
+                    "from sqlalchemy import Column, Integer, String, ForeignKey",
+                    "from database import Base"
+                ])
+            elif "flask" in fw:
+                get_req_imports("app.py").extend([
+                    "from flask import Flask, request, jsonify",
+                    "from flask_sqlalchemy import SQLAlchemy",
+                    "db = SQLAlchemy()"
+                ])
+                # Fix p09: Ensure JWT imports if JWT is mentioned
+                if "jwt" in arch_lower:
+                    get_req_imports("app.py").extend([
+                        "from flask_jwt_extended import JWTManager, jwt_required, create_access_token",
+                    ])
+            
+            # Deduplicate
+            for f in arch["required_imports"]:
+                arch["required_imports"][f] = list(dict.fromkeys(arch["required_imports"][f]))
+
         # If file_structure is empty, try to hallucinate a basic one based on tech stack
         if not arch["file_structure"]:
             ext = ".py" if language.lower() == "python" else ".js"

@@ -40,6 +40,7 @@ class SandboxService:
         language: str = "python",
         command: Optional[str] = None,
         timeout: int = 30,
+        entry_point: str = "main.py"
     ) -> Dict[str, Any]:
         """Execute project code in a temporary Docker container.
         
@@ -49,6 +50,7 @@ class SandboxService:
             language: Programming language environment
             command: Override the default execution command
             timeout: Maximum execution time in seconds
+            entry_point: The file to execute (if command is not provided)
             
         Returns:
             Dictionary with result (stdout, stderr, exit_code, success)
@@ -57,18 +59,32 @@ class SandboxService:
         import time
 
         image = self.image_map.get(language.lower(), "python:3.11-slim")
-        exec_cmd = command or self.default_commands.get(language.lower(), "python main.py")
         
-        # Check for host path configuration in Dockerized environments
-        from foundry.config import settings
-        if os.path.exists("/.dockerenv") and not settings.host_generated_projects_path:
-            logger.warning(
-                "RUNNING IN DOCKER: 'HOST_GENERATED_PROJECTS_PATH' is not set. "
-                "Docker volume mounting may fail if the host path is different from the container path."
-            )
+        # Check if entry_point exists in src/ if it's not found in root
+        actual_entry_point = entry_point
+        local_project_path = project_path
         
-        container_name = f"foundry-sandbox-{project_id[:8]}-{int(time.time())}"
-        
+        # Determine the relative path to the entry point within the sandbox
+        # If the file is in src/ but we are mounting project root to /app
+        # the command should be 'python src/main.py'
+        if not command:
+            if language.lower() == "python":
+                exec_cmd = f"python {entry_point}"
+            elif language.lower() in ("javascript", "typescript"):
+                exec_cmd = f"node {entry_point}" if entry_point.endswith(".js") else f"npx ts-node {entry_point}"
+            else:
+                exec_cmd = self.default_commands.get(language.lower(), "python main.py")
+        else:
+            exec_cmd = command
+
+        # SECURITY: If the entry_point is actually in a src/ folder (common in generated code)
+        # and the user just said 'main.py', we should try to find it.
+        # But in a sandbox we are running 'sh -c exec_cmd'.
+        # We can make it more robust by checking for the file in /app/src/main.py
+        if not command:
+            robust_exec_cmd = f"if [ -f {entry_point} ]; then {exec_cmd}; elif [ -f src/{entry_point} ]; then cd src && {exec_cmd}; else {exec_cmd}; fi"
+            exec_cmd = robust_exec_cmd
+
         # Construct the docker command
         docker_args = [
             "docker", "run", "--rm",

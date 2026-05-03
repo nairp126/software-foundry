@@ -79,3 +79,7 @@ sandbox/
 
 generated_projects/
 archive/
+
+#evaluation
+*evaluation/
+*FINAL_EVALUATION_REPORT.md

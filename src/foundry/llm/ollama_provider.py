@@ -37,7 +37,7 @@ class OllamaProvider(BaseLLMProvider):
         )
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=5.0)
+            timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=5.0)
         )
     
     async def _check_connection(self):
@@ -120,11 +120,11 @@ class OllamaProvider(BaseLLMProvider):
                         f"{self.base_url}/api/chat",
                         json=payload,
                     ),
-                    timeout=120.0,
+                    timeout=300.0,
                 )
         except asyncio.TimeoutError:
             raise TimeoutError(
-                f"Ollama request timed out after 120s for model {self.model_name}"
+                f"Ollama request timed out after 300s for model {self.model_name}"
             )
         if response.status_code == 404:
              raise ConnectionError(f"Model '{self.model_name}' not found in Ollama. Please run 'ollama pull {self.model_name}'")

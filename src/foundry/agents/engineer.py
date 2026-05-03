@@ -103,6 +103,15 @@ class EngineerAgent(Agent):
         if context:
             project_manifest = f"\nPROJECT STRUCTURE & RESPONSIBILITIES:\n{context}\n"
         
+        # Fix: Architectural Guardrails - Inject mandatory imports
+        required_imports_str = ""
+        if context and "REQUIRED_IMPORTS:" in context:
+            try:
+                # Extract the imports specific to this file from the context block
+                required_imports_str = f"\nCRITICAL: The Architect has mandated these specific imports for {filename}:\n{context.split('REQUIRED_IMPORTS:')[1].split('---')[0]}\nYou MUST include these at the top of the file.\n"
+            except (IndexError, ValueError):
+                logger.warning(f"Failed to parse required imports from context for {filename}")
+
         system_prompt = f"""You are an expert Software Engineer.{grounding_anchor}
         Your goal is to write high-quality, professional-grade code for the file: {filename}
 
@@ -118,9 +127,10 @@ class EngineerAgent(Agent):
         - Write clean, readable, well-documented code
         - MANDATORY: Include comprehensive unit tests for all logic. Place tests in a 'tests/' directory.
         - SEPARATION OF CONCERNS: Do NOT redefine models, schemas, or database logic already defined in other files. Import them instead.
-        - CRITICAL: Every function MUST contain real implementation logic. Using 'pass', 'TODO', or empty function bodies is STRICTLY FORBIDDEN. If a function should perform arithmetic, it must contain the actual math. If a function should query a database, it must contain the actual query code.
+        - CRITICAL: Every function MUST contain real implementation logic. Using 'pass', 'TODO', or empty function bodies is STRICTLY FORBIDDEN.
         - COMPLETENESS CHECK: Before finishing each file, verify that EVERY function has a return statement or produces a side-effect. No function should be a no-op.
         - SYNTAX CHECK: Ensure the code is syntactically correct for {language}. Verify all 'if', 'for', 'while', 'def', and 'class' blocks are properly indented and have a body.
+        {required_imports_str}
 
         {project_manifest}
         
@@ -175,13 +185,52 @@ class EngineerAgent(Agent):
             
             logger.info(f"Generating content for {filename} ({i+1}/{len(files_to_generate)})...")
 
-            # KG: inject project summary into EVERY file's prompt (Req 16.1 / 19.3)
+            # KG: inject project summary and internal symbols into EVERY file's prompt (Req 16.1 / 19.3)
             kg_project_summary = ""
             if self.kg_tools:
                 try:
                     kg_project_summary = await self.kg_tools.get_project_summary_for_generation(project_id)
+                    
+                    # Surgical Context Injection: Extract keywords from contract
+                    keywords = []
+                    if contract:
+                        # Extract CamelCase and Snake_Case words as potential symbols
+                        keywords = re.findall(r'\b[A-Z][a-zA-Z0-9]*\b|\b[a-z][a-z0-9_]*\b', contract)
+                        # Filter out common English words and small words
+                        stop_words = {'the', 'and', 'use', 'for', 'with', 'from', 'import', 'class', 'function', 'method'}
+                        keywords = [kw for kw in keywords if len(kw) > 3 and kw.lower() not in stop_words]
+                    
+                    # ADDED: Explicit SURGICAL import recommendations from KG
+                    kg_project_summary += await self.kg_tools.get_relevant_symbols(project_id, keywords)
+                    
+                    # Layered Architecture Guard Injection
+                    layer_info = "\nARCHITECTURAL LAYER CONSTRAINTS:\n"
+                    if "models" in filename or "schema" in filename:
+                        layer_info += "- This is a CORE LAYER file. Do NOT import from services, routes, or main.\n"
+                    elif "database" in filename:
+                        layer_info += "- This is a PERSISTENCE LAYER file. Only import from models.\n"
+                    elif "route" in filename or "app.py" in filename:
+                        layer_info += "- This is an INTERFACE LAYER file. You may import models, schemas, and database.\n"
+                    kg_project_summary += layer_info
+                    
                 except Exception as e:
                     logger.warning(f"KG project summary retrieval failed: {e}")
+
+            # Inject required_imports from architecture into the context
+            # Use basename matching to be flexible with paths (e.g., src/database.py matches database.py)
+            required_imports = []
+            if isinstance(architecture_content, dict):
+                req_map = architecture_content.get("required_imports", {})
+                base_filename = os.path.basename(filename)
+                
+                # Try exact match first, then basename match
+                if filename in req_map:
+                    required_imports = req_map[filename]
+                elif base_filename in req_map:
+                    required_imports = req_map[base_filename]
+            
+            if required_imports:
+                kg_project_summary += f"\nREQUIRED_IMPORTS:\n" + "\n".join(required_imports) + "\n---"
 
             code = await self._generate_file_content(
                 filename,
@@ -226,6 +275,11 @@ class EngineerAgent(Agent):
                         project_id
                     )
                     generated_files[filename] = code
+                    
+            if self.kg_tools and filename.endswith('.py'):
+                from foundry.utils.code_fixer import apply_deterministic_fixes
+                code = apply_deterministic_fixes(code, filename)
+                generated_files[filename] = code
 
             # INCREMENTAL INGESTION (Graph-First Strategy)
             if self.ingestion_pipeline:
@@ -547,11 +601,10 @@ class EngineerAgent(Agent):
                 context_str = "\n\nCRITICAL CONTEXT - PREVIOUSLY GENERATED FILES:\n"
                 context_str += "You MUST import from and be compatible with these files. Do NOT redefine their classes/functions.\n\n"
                 for prev_file, prev_content in previously_generated.items():
-                    # Inject up to 800 chars of each file for signature/model visibility
-                    truncated = prev_content[:800]
-                    if len(prev_content) > 800:
-                        truncated += "\n    # [SYSTEM NOTE: Rest of file truncated for context brevity]"
-                    context_str += f"--- {prev_file} ---\n{truncated}\n\n"
+                    # Extract signatures to provide full visibility into the project's interface
+                    # instead of just taking the first 800 characters.
+                    signatures = self._extract_signatures(prev_content)
+                    context_str += f"--- {prev_file} (Interface) ---\n{signatures}\n\n"
 
         code = await self._request_code_generation(
             filename, 
@@ -582,57 +635,24 @@ class EngineerAgent(Agent):
         return stubs
 
     def _clean_code(self, content: str) -> str:
-        """
-        Strips Markdown code blocks and other non-code text from LLM response.
-        Prioritizes content between backticks and strips common trailing chatter.
-        """
-        if not content:
-            return ""
+        from foundry.utils.code_fixer import clean_llm_markdown
+        return clean_llm_markdown(content)
+    
+    def _extract_signatures(self, code: str) -> str:
+        """Extract function and class signatures from Python code."""
+        signatures = []
+        # Match class definitions
+        class_matches = re.finditer(r'class\s+(\w+)(?:\(([^)]*)\))?\s*:', code)
+        for m in class_matches:
+            signatures.append(f"class {m.group(1)}({m.group(2) or ''}): ...")
             
-        # 1. Try to extract content between the first and last backticks
-        # Use greedy match for the outermost blocks
-        match = re.search(r'```(?:[a-zA-Z]*)\n?(.*?)\n?```', content, re.DOTALL)
-        if match:
-            clean_content = match.group(1).strip()
-        else:
-            # 2. Fallback: just strip any leading/trailing backticks and spaces
-            clean_content = content.replace('```', '').strip()
-        
-        # 3. Aggressive chatter stripping for common LLM closing phrases
-        chatter_patterns = [
-            r'\n\nThis solution follows the specified architecture.*$',
-            r'\n\nI hope this helps.*$',
-            r'\n\nLet me know if you need anything else.*$',
-            r'\n\nRequirements met:.*$',
-        ]
-        for pattern in chatter_patterns:
-            clean_content = re.sub(pattern, '', clean_content, flags=re.DOTALL | re.IGNORECASE).strip()
+        # Match async and normal function definitions
+        func_matches = re.finditer(r'(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*([^:]+))?\s*:', code)
+        for m in func_matches:
+            ret = f" -> {m.group(3).strip()}" if m.group(3) else ""
+            signatures.append(f"def {m.group(1)}({m.group(2).strip()}){ret}: ...")
             
-        # 4. DIVERSITY WATCHDOG: Detect and fix infinite repetition loops
-        # If we see a block of text (like 3+ lines) repeating 5+ times, truncate it
-        lines = clean_content.split('\n')
-        if len(lines) > 20:
-            for i in range(len(lines) - 10):
-                block = "\n".join(lines[i:i+3])
-                if block.strip() and clean_content.count(block) > 5:
-                    logger.warning(f"Diversity Watchdog triggered: Detected repeating block. Truncating.")
-                    # Keep the first occurrence and truncate
-                    first_idx = clean_content.find(block) + len(block)
-                    clean_content = clean_content[:first_idx] + "\n# [TRUNCATED DUE TO REPETITION LOOP]\n"
-                    break
-        
-        # 5. TRUNCATION LEAKAGE FIX: Remove accidental copy-pasted system truncation markers
-        clean_content = re.sub(r'# \.* \[truncated\]', '', clean_content, flags=re.IGNORECASE)
-        clean_content = re.sub(r'# \[SYSTEM NOTE: .*\]', '', clean_content, flags=re.IGNORECASE)
-        
-        # Final trim
-        clean_content = clean_content.strip()
-        
-        # Safety check: if we removed a block and left a trailing ':', add a 'pass'
-        if clean_content.endswith(':'):
-            clean_content += "\n    pass"
-
-        return clean_content
+        return "\n".join(signatures) if signatures else "# [No signatures found or not Python]"
 
     async def _recover_with_correct_language(self, filename: str, dirty_code: str, architecture: str, target_language: str = "python") -> str:
         """Recover a file generated in the wrong language using Language_Guards."""
@@ -670,8 +690,22 @@ class EngineerAgent(Agent):
             
         return written_files
     
+    def _clean_code(self, content: str) -> str:
+        from foundry.utils.code_fixer import clean_llm_markdown
+        return clean_llm_markdown(content)
+
+    def _detect_language(self, architecture_content: str, graph_state_language: str = "") -> str:
+        """Detect language from GraphState first, then fall back to architecture content."""
+        if graph_state_language and graph_state_language.strip():
+            return graph_state_language.lower().strip()
+        
+        # Fallback: inspection of architecture content
+        arch_str = str(architecture_content).lower()
+        if "java" in arch_str: return "java"
+        if "node" in arch_str or "javascript" in arch_str or "express" in arch_str: return "javascript"
+        if "typescript" in arch_str or " ts " in arch_str: return "typescript"
+        if "rust" in arch_str or " cargo " in arch_str: return "rust"
         return "python"  # Restrict to Python only as per user requirements
-    
     async def _enhance_code_quality(self, code: str, filename: str, language: str) -> str:
         """
         Enhance code quality by validating and improving coding standards.

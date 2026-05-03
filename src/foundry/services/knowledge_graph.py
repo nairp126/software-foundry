@@ -633,6 +633,38 @@ class KnowledgeGraphService:
         except Exception as e:
             logger.warning(f"store_error_fix failed (non-blocking): {e}")
 
+    async def get_error_fix(
+        self,
+        error_type: str,
+        error_message: str,
+        language: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Search the graph for similar errors and their fixes."""
+        try:
+            query = """
+            MATCH (ef:ErrorFix)
+            WHERE ef.language = $language 
+              AND (ef.error_type = $error_type OR ef.error_message CONTAINS $error_message)
+            RETURN ef.error_type as error_type, ef.error_message as error_message, 
+                   ef.fix_description as fix_description, ef.fixed_code as fixed_code
+            ORDER BY ef.created_at DESC
+            LIMIT 1
+            """
+            results = await self.client.execute_query(
+                query,
+                {
+                    "error_type": error_type,
+                    "error_message": (error_message[:50] if error_message else ""),
+                    "language": language,
+                },
+            )
+            if results:
+                return results[0]
+            return None
+        except Exception as e:
+            logger.warning(f"get_error_fix failed: {e}")
+            return None
+
     async def get_context_for_agent(
         self,
         project_id: str,

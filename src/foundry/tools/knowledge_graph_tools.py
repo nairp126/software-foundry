@@ -438,6 +438,81 @@ class KnowledgeGraphTools:
             self.kg_service.client.logger.warning(f"get_project_summary_for_generation failed: {e}")
             return ""
 
+    async def get_relevant_symbols(self, project_id: str, keywords: List[str]) -> str:
+        """Fetch only the symbols relevant to the current file's keywords. Never raises."""
+        if not keywords:
+            return await self.get_project_symbols(project_id)
+            
+        try:
+            query = """
+            MATCH (p:Project {id: $project_id})-[:CONTAINS*]->(n)
+            WHERE any(label IN labels(n) WHERE label IN ['Class', 'Function'])
+              AND any(kw IN $keywords WHERE n.name CONTAINS kw OR n.file_path CONTAINS kw)
+            RETURN n.name as name, n.file_path as file_path, labels(n)[0] as type
+            ORDER BY n.file_path, n.name
+            """
+            results = await self.kg_service.client.execute_query(
+                query, 
+                {"project_id": project_id, "keywords": keywords}
+            )
+            
+            if not results:
+                # Fallback to a lightweight global map if no specific matches
+                return await self.get_project_symbols(project_id)
+                
+            file_map = {}
+            for res in results:
+                path = res.get("file_path", "unknown")
+                if path not in file_map:
+                    file_map[path] = []
+                file_map[path].append(res.get("name", "unknown"))
+                
+            parts = ["\nSURGICAL PROJECT CONTEXT (Relevant Imports for this file):"]
+            for path, symbols in file_map.items():
+                module_path = os.path.splitext(path)[0].replace("/", ".").replace("\\", ".")
+                if module_path.startswith("."): module_path = module_path[1:]
+                # Standardize: remove 'src.' prefix if present
+                if module_path.startswith("src."): module_path = module_path[4:]
+                
+                parts.append(f"  - from {module_path} import {', '.join(symbols)}")
+            
+            return "\n".join(parts) + "\n"
+        except Exception as e:
+            self.kg_service.client.logger.warning(f"get_relevant_symbols failed: {e}")
+            return ""
+
+    async def get_project_symbols(self, project_id: str) -> str:
+        """Fetch all defined classes and functions to recommend imports. Never raises."""
+        try:
+            query = """
+            MATCH (p:Project {id: $project_id})-[:CONTAINS*]->(n)
+            WHERE any(label IN labels(n) WHERE label IN ['Class', 'Function'])
+            RETURN n.name as name, n.file_path as file_path, labels(n)[0] as type
+            ORDER BY n.file_path, n.name
+            """
+            results = await self.kg_service.client.execute_query(query, {"project_id": project_id})
+            if not results:
+                return ""
+                
+            file_map = {}
+            for res in results:
+                path = res.get("file_path", "unknown")
+                if path not in file_map:
+                    file_map[path] = []
+                file_map[path].append(res.get("name", "unknown"))
+                
+            parts = ["\nINTERNAL PROJECT SYMBOLS (Use these for cross-file imports):"]
+            for path, symbols in file_map.items():
+                module_path = os.path.splitext(path)[0].replace("/", ".").replace("\\", ".")
+                if module_path.startswith("."): module_path = module_path[1:]
+                if module_path.startswith("src."): module_path = module_path[4:]
+                parts.append(f"  - from {module_path} import {', '.join(symbols)}")
+            
+            return "\n".join(parts) + "\n"
+        except Exception as e:
+            self.kg_service.client.logger.warning(f"get_project_symbols failed: {e}")
+            return ""
+
     def format_for_llm(self, data: Any) -> str:
         """Format knowledge graph data for LLM consumption.
         
