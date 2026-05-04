@@ -30,6 +30,7 @@ from foundry.graph.ingestion import ingestion_pipeline
 from foundry.config import settings
 from foundry.services.agent_control import agent_control_service
 from foundry.utils.parsing import extract_json_from_text, parse_agent_response
+from foundry.services.kg_impact_guard import KGImpactGuard
 
 
 class AgentControlInterrupt(Exception):
@@ -96,6 +97,7 @@ class AgentOrchestrator:
         self.code_review_agent = CodeReviewAgent()
         self.reflexion_agent = ReflexionAgent()
         self.kg_service = KnowledgeGraphService()
+        self.impact_guard = KGImpactGuard()
         self._checkpointer = MemorySaver()
         self.graph = self._build_graph()
 
@@ -445,16 +447,37 @@ class AgentOrchestrator:
         resolved_entry = ImportResolver.discover_entry_point(code_repo)
         logger.info(f"Resolved entry point: {resolved_entry}")
 
+        # KG Impact Guard: Sync downstream files
+        to_sync = await self._handle_impact_sync(state, code_repo)
+        if to_sync:
+            logger.info(f"KG Impact Guard: Downstream files impacted by this change: {to_sync}")
+
         return {
-            "messages": [AIMessage(content=f"Code generated for {len(code_repo)} files.")],
+            "messages": [AIMessage(content=f"Code generated for {len(code_repo)} files. Impacted files: {to_sync}")],
             "project_context": {
                 **state["project_context"], 
                 "code_repo": code_repo, 
                 "architecture": architecture, 
                 "prd": prd,
-                "entry_point": resolved_entry
+                "entry_point": resolved_entry,
+                "sync_required": to_sync # Pass this to the next iteration
             }
         }
+
+    async def _handle_impact_sync(self, state: GraphState, code_repo: Dict[str, str]) -> List[str]:
+        """Analyzes modified files and identifies downstream files needing sync."""
+        try:
+            modified_files = set(code_repo.keys()) # For now assume all are modified in first pass
+            # In a real system, we'd compare with the previous state in project_context
+            to_sync = await self.impact_guard.synchronize_project_state(
+                state["project_id"], 
+                code_repo, 
+                modified_files
+            )
+            return to_sync
+        except Exception as e:
+            logger.warning(f"Impact Sync failed: {e}")
+            return []
 
     async def _code_review_node(self, state: GraphState) -> Dict[str, Any]:
         """Node for Code Review agent."""
@@ -501,7 +524,10 @@ class AgentOrchestrator:
 
         return {
             "messages": [AIMessage(content=f"Code review completed. Status: {review_results.get('status')}")],
-            "project_context": {**state["project_context"]},
+            "project_context": {
+                **state["project_context"],
+                "code_repo": review_results.get("code_repo") or code_repo
+            },
             "review_feedback": review_results
         }
 

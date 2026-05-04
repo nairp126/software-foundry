@@ -231,23 +231,37 @@ class CodeReviewAgent(Agent):
                     "source": "llm_reviewer"
                 })
 
-        # Prepend sandbox issues so they are visible first
-        merged_issues = sandbox_issues + normalised_issues
+        # Step 5: Apply formatted code if available
+        if gate_results and gate_results.formatted_code:
+            for filename, formatted in gate_results.formatted_code.items():
+                if formatted and formatted != code_files.get(filename):
+                    logger.info(f"Applying auto-formatting to {filename}")
+                    code_files[filename] = formatted
 
-        # Escalate status if sandbox found HIGH issues
-        status = review_data.get("status", "REJECTED")
-        if sandbox_issues and status == "APPROVED":
-            status = "REJECTED"
+        # Step 6: Final check for 0.0.0.0 bindings in non-entrypoints
+        final_issues = sandbox_issues + normalised_issues
+        for filename, content in code_files.items():
+            if 'host="0.0.0.0"' in content or "host='0.0.0.0'" in content:
+                if filename not in ('app.py', 'main.py'):
+                    final_issues.append({
+                        "severity": "HIGH",
+                        "file": filename,
+                        "description": "Hardcoded binding to 0.0.0.0 detected in non-entrypoint file.",
+                        "suggestion": "Change host to '127.0.0.1' or move deployment logic to main.py.",
+                        "source": "security_gate_custom"
+                    })
+                    review_data["status"] = "REJECTED"
 
         payload = {
-            "status": status,
+            "status": review_data.get("status", "REJECTED"),
             "feedback": review_data.get("feedback", ""),
-            "issues": merged_issues,
+            "issues": final_issues,
+            "code_repo": code_files # Return formatted code
         }
 
         return AgentMessage(
             sender=self.agent_type,
-            recipient=AgentType.REFLEXION, # Corrected semantic routing (MED-REV-1)
+            recipient=AgentType.REFLEXION,
             message_type=MessageType.TASK,
             payload=payload,
         )

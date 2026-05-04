@@ -4,6 +4,7 @@ These tools allow agents to query the knowledge graph for context,
 dependencies, and impact analysis.
 """
 
+import os
 from typing import List, Dict, Any, Optional
 from foundry.services.knowledge_graph import KnowledgeGraphService
 from foundry.config import settings

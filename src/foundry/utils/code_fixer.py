@@ -1,5 +1,6 @@
 import re
 import os
+import ast
 import logging
 from typing import Optional
 
@@ -89,7 +90,77 @@ def apply_deterministic_fixes(code: str, filename: str) -> str:
         flags=re.MULTILINE
     )
 
+    # 9. Dynamic Import Injection (Standard Libs)
+    code = inject_missing_standard_libs(code)
+
+    # 10. Vulture Sanitizer (Unused Import Stripper)
+    if base_name != '__init__.py':
+        code = strip_unused_imports(code)
+
     return code
+
+def inject_missing_standard_libs(code: str) -> str:
+    """Detects usage of standard libraries and injects missing imports."""
+    lib_map = {
+        'datetime.': 'import datetime',
+        'json.': 'import json',
+        'time.': 'import time',
+        'math.': 'import math',
+        'os.path': 'import os',
+        'random.': 'import random',
+        'sys.': 'import sys',
+        're.': 'import re'
+    }
+    
+    # Track which ones we need to add
+    to_add = []
+    for key, imp in lib_map.items():
+        # Check if keyword is used but import is missing
+        if key in code and imp not in code and f"from {imp.split()[-1]}" not in code:
+            to_add.append(imp)
+    
+    if to_add:
+        logger.info(f"Dynamic Import Fix: Injecting {to_add}")
+        return "\n".join(to_add) + "\n" + code
+    return code
+
+def strip_unused_imports(code: str) -> str:
+    """Removes imports that are not used in the code body (Vulture Sanitizer)."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Fallback: If syntax is broken, don't risk stripping valid imports
+        return code
+
+    # Collect all names used in the code
+    used_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            used_names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            # Also catch things like 'datetime' in 'datetime.now()'
+            if isinstance(node.value, ast.Name):
+                used_names.add(node.value.id)
+
+    class ImportStripper(ast.NodeTransformer):
+        def visit_Import(self, node):
+            node.names = [n for n in node.names if n.name.split('.')[0] in used_names or n.asname in used_names]
+            return node if node.names else None
+
+        def visit_ImportFrom(self, node):
+            if node.module == '__future__':
+                return node
+            # For 'from x import y', check if 'y' or 'asname' is used
+            node.names = [n for n in node.names if n.name in used_names or n.asname in used_names]
+            return node if node.names else None
+
+    try:
+        new_tree = ImportStripper().visit(tree)
+        # ast.unparse is available in Python 3.9+
+        return ast.unparse(new_tree)
+    except Exception as e:
+        logger.warning(f"AST unparse failed for {base_name}: {e}")
+        return code
 
 def clean_llm_markdown(content: str) -> str:
     """Strips Markdown code blocks and other non-code text from LLM response."""

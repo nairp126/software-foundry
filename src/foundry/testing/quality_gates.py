@@ -67,6 +67,7 @@ class QualityGateResult:
     lint_issues: List[LintIssue] = field(default_factory=list)
     type_issues: List[TypeIssue] = field(default_factory=list)
     security_issues: List[SecurityIssue] = field(default_factory=list)
+    formatted_code: Dict[str, str] = field(default_factory=dict)
     summary: str = ""
 
 
@@ -110,8 +111,8 @@ class QualityGates:
         type_checking_task = self.run_type_checking(code_files, language, project_path)
         security_task = self.run_security_scan(code_files, language)
 
-        lint_result, type_result, security_result = await asyncio.gather(
-            linting_task, type_checking_task, security_task
+        lint_result, type_result, security_result, formatted_code = await asyncio.gather(
+            linting_task, type_checking_task, security_task, self.run_formatter(code_files, language)
         )
 
         # Determine if all gates passed
@@ -134,6 +135,7 @@ class QualityGates:
             lint_issues=lint_result,
             type_issues=type_result,
             security_issues=security_result,
+            formatted_code=formatted_code,
             summary=summary,
         )
 
@@ -359,6 +361,35 @@ class QualityGates:
             issues.extend(await self._run_npm_audit(code_files))
 
         return issues
+
+    async def run_formatter(self, code_files: Dict[str, str], language: str) -> Dict[str, str]:
+        """Run code formatter (Black for Python) on the provided code."""
+        if language.lower() != "python":
+            return {}
+
+        formatted_files = {}
+        try:
+            sandbox = await self.sandbox_env.create_sandbox("python", ["black"])
+            for filename, code in code_files.items():
+                if filename.endswith(".py"):
+                    # Use execute_code to write the file and then run black on it
+                    code_obj = Code(content=code, language="python", filename=filename)
+                    # Running black on the file directly in the sandbox
+                    result = await self.sandbox_env.execute_code(
+                        sandbox, code_obj, command=f"black -q {filename} && cat {filename} || true"
+                    )
+                    # Note: formatted code is now in stdout (from cat)
+                    if result.stdout and result.success:
+                        # Clean output (cat might include extra stuff depending on environment)
+                        formatted_files[filename] = result.stdout.strip()
+                    else:
+                        formatted_files[filename] = code
+            await self.sandbox_env.cleanup_sandbox(sandbox)
+        except Exception as e:
+            logger.warning(f"Formatting failed: {e}")
+            return code_files
+
+        return formatted_files
 
     def _detect_secrets(self, code_files: Dict[str, str]) -> List[SecurityIssue]:
         """Detect hardcoded secrets in code."""
