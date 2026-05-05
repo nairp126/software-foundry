@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 class OllamaProvider(BaseLLMProvider):
     """Ollama provider for local model inference."""
     
-    # Class-level semaphore to prevent VRAM exhaustion on local hardware (Req 8.4)
-    _semaphore = asyncio.Semaphore(1)
+    # Class-level semaphore to allow 2 concurrent agents (Req 8.4)
+    _semaphore = asyncio.Semaphore(2)
     def __init__(
         self,
         model_name: Optional[str] = None,
@@ -90,9 +90,10 @@ class OllamaProvider(BaseLLMProvider):
             "stream": False,
             "options": {
                 "temperature": temperature,
-                "num_ctx": 8192,  # Increased for larger projects
-                "num_thread": 4,  # More stable default
-                "num_predict": 2048, # Prevent runaway generation
+                "num_ctx": 8192,
+                "num_thread": 8,      # Increased for performance
+                "num_gpu": 50,        # Maximize GPU offloading
+                "num_predict": 2048,
             }
         }
         

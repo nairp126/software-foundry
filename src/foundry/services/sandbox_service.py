@@ -86,6 +86,7 @@ class SandboxService:
             exec_cmd = robust_exec_cmd
 
         # Construct the docker command
+        container_name = f"foundry-sandbox-{project_id}-{int(time.time())}"
         docker_args = [
             "docker", "run", "--rm",
             "--name", container_name,
