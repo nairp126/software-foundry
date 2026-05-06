@@ -413,6 +413,7 @@ class AgentOrchestrator:
         # EARLY INGESTION: Ingest into Knowledge Graph after first generation or repair
         try:
             project_path = os.path.join(settings.generated_projects_path, state["project_id"])
+            reflexion_count = state.get("reflexion_count", 0)
             
             # Extract project name from PRD if available
             project_name = "New Project"
@@ -421,26 +422,41 @@ class AgentOrchestrator:
                 if name_match:
                     project_name = name_match.group(1).strip()
             
-            # Clear stale incremental nodes before full re-ingestion
-            # This preserves the real-time KG strategy (per-file during generation)
-            # while ensuring the final graph has no duplicates
-            try:
-                from foundry.services.knowledge_graph import knowledge_graph_service
-                await knowledge_graph_service.client.connect()
-                await knowledge_graph_service.clear_project(state["project_id"])
-                logger.info(f"Cleared stale KG data for project {state['project_id']} before re-ingestion")
-            except Exception as e:
-                logger.warning(f"Failed to clear KG before re-ingestion: {e}")
-            
-            await ingestion_pipeline.ingest_project(
-                project_id=state["project_id"],
-                project_name=f"{project_name} ({state.get('language', 'python')})",
-                project_path=project_path,
-                language=state.get("language", "python")
-            )
-            logger.info(f"Project {state['project_id']} successfully ingested/updated in KG")
+            from foundry.services.knowledge_graph import knowledge_graph_service
+            await knowledge_graph_service.client.connect()
+
+            if reflexion_count == 0:
+                # First pass: Clear stale incremental nodes and perform full re-ingestion
+                # This ensures the final graph is clean and deduplicated.
+                try:
+                    await knowledge_graph_service.clear_project(state["project_id"])
+                    logger.info(f"Cleared stale KG data for project {state['project_id']} before re-ingestion")
+                except Exception as e:
+                    logger.warning(f"Failed to clear KG before re-ingestion: {e}")
+                
+                await ingestion_pipeline.ingest_project(
+                    project_id=state["project_id"],
+                    project_name=f"{project_name} ({state.get('language', 'python')})",
+                    project_path=project_path,
+                    language=state.get("language", "python")
+                )
+                logger.info(f"Project {state['project_id']} successfully ingested in KG")
+            else:
+                # Selective Re-Ingestion (Patent Gap 4 Fix):
+                # Preserve existing graph and only update modified files to maintain context continuity.
+                logger.info(f"Reflexion pass {reflexion_count}: Performing selective KG re-ingestion...")
+                for file_path, content in code_repo.items():
+                    # Only re-ingest source files
+                    if any(file_path.endswith(ext) for ext in ['.py', '.js', '.ts', '.java']):
+                        await ingestion_pipeline.ingest_source(
+                            project_id=state["project_id"],
+                            file_path=file_path,
+                            code=content
+                        )
+                logger.info(f"Selective KG re-ingestion complete for {len(code_repo)} files.")
+
         except Exception as e:
-            logger.error(f"Early KG ingestion failed: {e}")
+            logger.error(f"KG ingestion failed: {e}")
 
         # Discover entry point dynamically
         from foundry.tools.import_resolver import ImportResolver

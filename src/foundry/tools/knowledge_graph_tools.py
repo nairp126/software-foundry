@@ -24,6 +24,11 @@ class KnowledgeGraphTools:
         """Disconnect from Neo4j."""
         await self.kg_service.client.disconnect()
     
+    async def _ensure_connected(self):
+        """Ensure the Neo4j client is connected."""
+        if not self.kg_service.client._driver:
+            await self.connect()
+    
     async def find_function_dependencies(
         self,
         project_id: str,
@@ -40,10 +45,11 @@ class KnowledgeGraphTools:
         Returns:
             List of dependency information
         """
+        await self._ensure_connected()
+        # Fix: Align with KnowledgeGraphService.find_dependencies(component_id, depth)
         return await self.kg_service.find_dependencies(
-            project_id=project_id,
-            component_name=function_name,
-            max_depth=max_depth
+            component_id=function_name, # Service uses ID, but Tool layer passes name as ID
+            depth=max_depth
         )
     
     async def analyze_change_impact(
@@ -62,9 +68,10 @@ class KnowledgeGraphTools:
         Returns:
             Impact analysis with affected components
         """
+        await self._ensure_connected()
+        # Fix: Align with KnowledgeGraphService.analyze_impact(component_id, max_depth)
         return await self.kg_service.analyze_impact(
-            project_id=project_id,
-            component_name=component_name,
+            component_id=component_name,
             max_depth=max_depth
         )
     
@@ -82,6 +89,7 @@ class KnowledgeGraphTools:
         Returns:
             List of caller information
         """
+        await self._ensure_connected()
         query = """
         MATCH (project:Project {id: $project_id})
         MATCH (project)-[:CONTAINS*]->(caller)
@@ -115,10 +123,12 @@ class KnowledgeGraphTools:
         Returns:
             List of matching components
         """
+        await self._ensure_connected()
+        # Fix: Align with KnowledgeGraphService.search_patterns(pattern_type, pattern_value, project_id)
         return await self.kg_service.search_patterns(
-            project_id=project_id,
-            pattern=pattern,
-            node_type=node_type
+            pattern_type=node_type or "name",
+            pattern_value=pattern,
+            project_id=project_id
         )
     
     async def get_component_context(
@@ -140,6 +150,7 @@ class KnowledgeGraphTools:
         Returns:
             Comprehensive context information
         """
+        await self._ensure_connected()
         return await self.kg_service.get_context_for_agent(
             project_id=project_id,
             component_name=component_name,
@@ -160,6 +171,7 @@ class KnowledgeGraphTools:
         Returns:
             List of components in the file
         """
+        await self._ensure_connected()
         query = """
         MATCH (project:Project {id: $project_id})
         MATCH (project)-[:CONTAINS*]->(component)
@@ -193,6 +205,7 @@ class KnowledgeGraphTools:
         Returns:
             List of high-complexity components
         """
+        await self._ensure_connected()
         query = """
         MATCH (project:Project {id: $project_id})
         MATCH (project)-[:CONTAINS*]->(component:Function)
@@ -231,6 +244,7 @@ class KnowledgeGraphTools:
         Returns:
             Formatted string of dependency source code for LLM injection
         """
+        await self._ensure_connected()
         if not dependency_names:
             return ""
         

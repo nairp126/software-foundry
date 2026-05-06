@@ -75,7 +75,7 @@ dmypy.json
 # Project specific
 data/
 temp/
-sandbox/
+
 
 generated_projects/
 archive/
@@ -83,3 +83,8 @@ archive/
 #evaluation
 *evaluation/
 *FINAL_EVALUATION_REPORT.md
+*presentation copy.md
+*presentation_slides_notes.md
+*qna.md
+
+patents/

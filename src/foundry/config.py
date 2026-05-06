@@ -98,5 +98,8 @@ class Settings(BaseSettings):
     enable_metrics: bool = Field(default=True)
     enable_tracing: bool = Field(default=False)
 
+    # Patent Readiness / A/B Testing
+    enable_kg: bool = Field(default=True)
+
 
 settings = Settings()

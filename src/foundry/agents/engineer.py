@@ -11,6 +11,9 @@ from foundry.testing.test_generator import TestGenerator, TestFramework
 from foundry.testing.quality_gates import QualityGates
 from foundry.graph.ingestion import IngestionPipeline
 from foundry.tools.import_resolver import ImportResolver
+from foundry.config import settings
+from foundry.metrics import SurgicalContextMetrics, MetricsCollector
+import time
 
 
 logger = logging.getLogger(__name__)
@@ -67,8 +70,13 @@ class EngineerAgent(Agent):
         # Knowledge Graph integration for context-aware code generation
         try:
             from foundry.tools.knowledge_graph_tools import KnowledgeGraphTools
-            self.kg_tools = KnowledgeGraphTools()
-            self.ingestion_pipeline = IngestionPipeline()
+            if settings.enable_kg:
+                self.kg_tools = KnowledgeGraphTools()
+                self.ingestion_pipeline = IngestionPipeline()
+            else:
+                logger.info("KG integration disabled via configuration.")
+                self.kg_tools = None
+                self.ingestion_pipeline = None
         except ImportError:
             self.kg_tools = None
             self.ingestion_pipeline = None
@@ -170,6 +178,9 @@ class EngineerAgent(Agent):
         generated_files = {}
         files_to_generate = self._parse_file_list(file_structure)
         
+        # Initialize metrics collector
+        self._metrics_collector = MetricsCollector(project_id)
+        
         # Root Cause 1 Fix: Raise file cap to 50 to accommodate larger projects (Req 20.3)
         files_to_generate = files_to_generate[:50]  
 
@@ -232,6 +243,9 @@ class EngineerAgent(Agent):
             if required_imports:
                 kg_project_summary += f"\nREQUIRED_IMPORTS:\n" + "\n".join(required_imports) + "\n---"
 
+            # Surgical Context Injection: Track efficiency for patent metrics
+            current_metric = SurgicalContextMetrics(file_path=filename)
+            
             code = await self._generate_file_content(
                 filename,
                 architecture_content,
@@ -244,6 +258,7 @@ class EngineerAgent(Agent):
                 project_id,
                 kg_project_summary=kg_project_summary,
                 file_contract=contract,
+                metric=current_metric
             )
 
             # 3-Attempt Language-Aware Recovery Loop
@@ -284,14 +299,21 @@ class EngineerAgent(Agent):
             # INCREMENTAL INGESTION (Graph-First Strategy)
             if self.ingestion_pipeline:
                 try:
-                    await self.ingestion_pipeline.ingest_source(
+                    ingest_start = time.time()
+                    ingest_stats = await self.ingestion_pipeline.ingest_source(
                         code=generated_files[filename],
                         file_path=filename,
                         project_id=project_id
                     )
+                    current_metric.ingestion_latency_ms = (time.time() - ingest_start) * 1000
+                    current_metric.symbols_resolved = ingest_stats.get("functions_created", 0) + ingest_stats.get("classes_created", 0)
                     logger.info(f"Successfully ingested {filename} into Knowledge Graph.")
                 except Exception as e:
                     logger.warning(f"Failed to ingest {filename} into KG: {e}")
+
+            # Collect metrics
+            if hasattr(self, "_metrics_collector") and self._metrics_collector:
+                self._metrics_collector.add_metric(current_metric)
 
         # Ensure structural integrity (__init__.py files)
         if language == "python":
@@ -329,6 +351,12 @@ class EngineerAgent(Agent):
             manifest_name, manifest_content = await self._generate_dependency_manifest(final_repo, language)
             if manifest_name:
                 final_repo[manifest_name] = manifest_content
+
+        # Flush metrics
+        if self._metrics_collector:
+            report_path = self._metrics_collector.flush()
+            if report_path:
+                logger.info(f"Patent metrics flushed to: {report_path}")
 
         quality_result = await self.run_quality_gates(final_repo, language, "/tmp/project")
         integration_report = self._validate_component_integration(final_repo)
@@ -550,6 +578,7 @@ class EngineerAgent(Agent):
         project_id: str = "current",
         kg_project_summary: str = "",
         file_contract: str = "",
+        metric: Optional[SurgicalContextMetrics] = None
     ) -> str:
         """
         Generate file content with coding standards and security measures.
@@ -586,25 +615,37 @@ class EngineerAgent(Agent):
                     # Extract dependency names from the file list
                     dep_names = [os.path.splitext(os.path.basename(f))[0] 
                                  for f in previously_generated.keys()]
+                    
+                    retrieval_start = time.time()
                     kg_surgical_context = await self.kg_tools.get_surgical_context(
                         project_id=project_id,
                         dependency_names=dep_names
                     )
+                    if metric:
+                        metric.kg_retrieval_latency_ms = (time.time() - retrieval_start) * 1000
                 except Exception as e:
                     logger.warning(f"GraphRAG retrieval failed, falling back to truncation: {e}")
 
             if kg_surgical_context:
                 # GraphRAG path: Use precise, structured context from the KG
                 context_str = f"\n\nKNOWLEDGE GRAPH CONTEXT (Related Symbols & Definitions):\n{kg_surgical_context}\n"
+                if metric:
+                    metric.path_used = "kg_surgical"
+                    metric.kg_context_tokens = len(kg_surgical_context.split())
             else:
                 # FALLBACK: Inject truncated content of key files for cross-file coherence
                 context_str = "\n\nCRITICAL CONTEXT - PREVIOUSLY GENERATED FILES:\n"
                 context_str += "You MUST import from and be compatible with these files. Do NOT redefine their classes/functions.\n\n"
+                fallback_tokens = 0
                 for prev_file, prev_content in previously_generated.items():
                     # Extract signatures to provide full visibility into the project's interface
-                    # instead of just taking the first 800 characters.
                     signatures = self._extract_signatures(prev_content)
                     context_str += f"--- {prev_file} (Interface) ---\n{signatures}\n\n"
+                    fallback_tokens += len(signatures.split())
+                
+                if metric:
+                    metric.path_used = "fallback_truncation"
+                    metric.fallback_context_tokens = fallback_tokens
 
         code = await self._request_code_generation(
             filename, 
