@@ -4,6 +4,7 @@ from typing import Optional, List, Any, AsyncIterator
 import httpx
 from foundry.llm.base import BaseLLMProvider, LLMMessage, LLMResponse
 from foundry.config import settings
+from foundry.llm.vram_budget_manager import vram_manager
 
 
 class VLLMProvider(BaseLLMProvider):
@@ -67,11 +68,16 @@ class VLLMProvider(BaseLLMProvider):
             "Content-Type": "application/json",
         }
         
-        response = await self.client.post(
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-        )
+        agent_name = kwargs.pop("agent_name", "unknown")
+        # Estimate context size
+        context_size = sum(len(m.content) for m in messages) // 4
+        
+        async with vram_manager.acquire_slot(agent_name=agent_name, provider="vllm", context_size=context_size):
+            response = await self.client.post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
         response.raise_for_status()
         
         data = response.json()

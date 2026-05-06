@@ -101,5 +101,9 @@ class Settings(BaseSettings):
     # Patent Readiness / A/B Testing
     enable_kg: bool = Field(default=True)
 
+    # VRAM Budget Manager
+    vram_context_overhead_factor: float = Field(default=1.25)
+    max_concurrent_agents: int = Field(default=4)
+
 
 settings = Settings()

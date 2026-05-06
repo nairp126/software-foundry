@@ -50,7 +50,7 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> LLMResponse:
         """Generate completion from messages using OpenAI."""
         lc_messages = self._convert_messages(messages)
-        
+        kwargs.pop("agent_name", None)
         response = await self.client.ainvoke(
             lc_messages, 
             temperature=temperature,
@@ -80,7 +80,7 @@ class OpenAIProvider(BaseLLMProvider):
     ):
         """Stream completion from messages using OpenAI."""
         lc_messages = self._convert_messages(messages)
-        
+        kwargs.pop("agent_name", None)
         async for chunk in self.client.astream(
             lc_messages, 
             temperature=temperature,

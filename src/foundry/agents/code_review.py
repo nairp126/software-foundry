@@ -158,7 +158,7 @@ class CodeReviewAgent(Agent):
             LLMMessage(role="user", content=user_prompt)
         ]
 
-        response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
+        response = await self.llm.generate(messages, temperature=0.2, json_mode=True, agent_name="CodeReview")
 
         # Parse review response
         review_data = response.content

@@ -13,6 +13,7 @@ from foundry.graph.ingestion import IngestionPipeline
 from foundry.tools.import_resolver import ImportResolver
 from foundry.config import settings
 from foundry.metrics import SurgicalContextMetrics, MetricsCollector
+from foundry.llm.vram_budget_manager import vram_manager
 import time
 
 
@@ -158,7 +159,7 @@ class EngineerAgent(Agent):
             LLMMessage(role="system", content=system_prompt),
             LLMMessage(role="user", content=user_prompt),
         ]
-        response = await self.llm.generate(messages, temperature=0.2)
+        response = await self.llm.generate(messages, temperature=0.2, agent_name="Engineer")
         return self._clean_code(response.content)
     async def generate_code(self, architecture_content: str, prd_content: str = "", requirements: str = "", fix_instructions: str = "", existing_code: Dict[str, str] = None, project_id: str = "current", graph_state_language: str = "") -> AgentMessage:
         """
@@ -357,6 +358,9 @@ class EngineerAgent(Agent):
             report_path = self._metrics_collector.flush()
             if report_path:
                 logger.info(f"Patent metrics flushed to: {report_path}")
+        
+        # Flush VRAM metrics
+        vram_manager.flush_metrics(project_id)
 
         quality_result = await self.run_quality_gates(final_repo, language, "/tmp/project")
         integration_report = self._validate_component_integration(final_repo)
@@ -432,7 +436,7 @@ class EngineerAgent(Agent):
             LLMMessage(role="system", content=system_prompt),
             LLMMessage(role="user", content=user_prompt)
         ]
-        response = await self.llm.generate(messages, temperature=0.1)
+        response = await self.llm.generate(messages, temperature=0.1, agent_name="Engineer")
         return response.content
 
     def _parse_file_list(self, response_content: str) -> List[Dict[str, str]]:
@@ -700,7 +704,7 @@ class EngineerAgent(Agent):
         from foundry.utils.language_guards import recover_prompt
         prompt = recover_prompt(filename, dirty_code, target_language, architecture)
         messages = [LLMMessage(role="user", content=prompt)]
-        response = await self.llm.generate(messages, temperature=0.1)
+        response = await self.llm.generate(messages, temperature=0.1, agent_name="Engineer")
         return self._clean_code(response.content)
     
     def write_code_to_disk(self, code_files: Dict[str, str], base_path: str) -> List[str]:
@@ -835,7 +839,7 @@ class EngineerAgent(Agent):
             LLMMessage(role="user", content=user_prompt)
         ]
         
-        response = await self.llm.generate(messages, temperature=0.1)
+        response = await self.llm.generate(messages, temperature=0.1, agent_name="Engineer")
         return response.content
     
     def _validate_component_integration(self, code_files: Dict[str, str]) -> Dict[str, Any]:
@@ -1009,7 +1013,7 @@ class EngineerAgent(Agent):
         ]
         
         try:
-            response = await self.llm.generate(messages, temperature=0.1)
+            response = await self.llm.generate(messages, temperature=0.1, agent_name="Engineer")
             mock_content = self._clean_code(response.content)
             return "tests/mocks.py", mock_content
         except Exception as e:
@@ -1086,7 +1090,7 @@ class EngineerAgent(Agent):
         ]
         
         try:
-            response = await self.llm.generate(messages, temperature=0.1)
+            response = await self.llm.generate(messages, temperature=0.1, agent_name="Engineer")
             return manifest_name, response.content.strip()
         except Exception as e:
             logger.error(f"Failed to generate fallback manifest: {e}")

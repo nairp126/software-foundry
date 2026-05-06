@@ -7,6 +7,7 @@ import logging
 import httpx
 from foundry.llm.base import BaseLLMProvider, LLMMessage, LLMResponse
 from foundry.config import settings
+from foundry.llm.vram_budget_manager import vram_manager
 
 
 
@@ -16,8 +17,6 @@ logger = logging.getLogger(__name__)
 class OllamaProvider(BaseLLMProvider):
     """Ollama provider for local model inference."""
     
-    # Class-level semaphore to allow 2 concurrent agents (Req 8.4)
-    _semaphore = asyncio.Semaphore(2)
     def __init__(
         self,
         model_name: Optional[str] = None,
@@ -114,8 +113,12 @@ class OllamaProvider(BaseLLMProvider):
             raise
 
         try:
-            async with self._semaphore:
-                logger.info(f"LLM Request starting (Model: {self.model_name}, Payload: {len(str(payload))} chars)")
+            agent_name = kwargs.pop("agent_name", "unknown")
+            # Estimate context size (chars / 4 approx tokens)
+            context_size = sum(len(m.content) for m in messages) // 4
+            
+            async with vram_manager.acquire_slot(agent_name=agent_name, provider="ollama", context_size=context_size):
+                logger.info(f"LLM Request starting (Model: {self.model_name}, Agent: {agent_name}, Context: {context_size} tokens)")
                 response = await asyncio.wait_for(
                     self.client.post(
                         f"{self.base_url}/api/chat",

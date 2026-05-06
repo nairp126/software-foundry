@@ -274,7 +274,7 @@ class ReflexionEngine(Agent):
             LLMMessage(role="user", content=user_prompt)
         ]
         
-        response = await self.llm.generate(messages, temperature=0.3)
+        response = await self.llm.generate(messages, temperature=0.3, agent_name="Reflexion")
         fixed_code = response.content.strip()
         
         # Clean markdown
@@ -631,7 +631,7 @@ class ReflexionEngine(Agent):
             ]
             
             # Use lower temp for fix plans to ensure JSON validity
-            response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
+            response = await self.llm.generate(messages, temperature=0.2, json_mode=True, agent_name="Reflexion")
             try:
                 # Clean and parse JSON using robust utility
                 fix_plan_dict = extract_json_from_text(response.content)
@@ -772,7 +772,7 @@ class ReflexionEngine(Agent):
             LLMMessage(role="user", content=f"{user_prompt}{kg_context}{kg_similar_fixes}")
         ]
 
-        response = await self.llm.generate(messages, temperature=0.5)
+        response = await self.llm.generate(messages, temperature=0.5, agent_name="Reflexion")
 
         # Parse the LLM response as structured fix_plan JSON
         fix_plan_dict = extract_json_from_text(response.content)

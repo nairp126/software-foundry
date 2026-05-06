@@ -146,7 +146,7 @@ class ArchitectAgent(Agent):
         # Two-pass validation: self-correct once if the output looks wrong, then validate again
         architecture_content = ""
         for attempt in range(2):
-            response = await self.llm.generate(messages, temperature=0.2)
+            response = await self.llm.generate(messages, temperature=0.2, agent_name="Architect")
             architecture_content = response.content
             try:
                 # Use robust extraction
@@ -393,7 +393,7 @@ Technology Stack:
             LLMMessage(role="user", content=user_prompt)
         ]
         
-        response = await self.llm.generate(messages, temperature=0.5)
+        response = await self.llm.generate(messages, temperature=0.5, agent_name="Architect")
         
         try:
             result = json.loads(response.content)
@@ -491,7 +491,7 @@ Focus on major decisions like:
             LLMMessage(role="user", content=user_prompt)
         ]
         
-        response = await self.llm.generate(messages, temperature=0.6)
+        response = await self.llm.generate(messages, temperature=0.6, agent_name="Architect")
         
         try:
             return json.loads(response.content)
@@ -572,7 +572,7 @@ Context:
             LLMMessage(role="user", content=user_prompt)
         ]
         
-        response = await self.llm.generate(messages, temperature=0.6)
+        response = await self.llm.generate(messages, temperature=0.6, agent_name="Architect")
         
         try:
             return json.loads(response.content)

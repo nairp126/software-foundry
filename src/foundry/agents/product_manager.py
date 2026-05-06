@@ -116,7 +116,7 @@ class ProductManagerAgent(Agent):
         ]
         
         logger.info(f"PM Agent Analyzing requirements (Length: {len(requirements)} chars)")
-        response = await self.llm.generate(messages, temperature=0.1)
+        response = await self.llm.generate(messages, temperature=0.1, agent_name="ProductManager")
         raw_content = response.content.strip()
         logger.debug(f"PM Agent Raw Response: '{raw_content[:200]}...'")
         
@@ -181,7 +181,7 @@ class ProductManagerAgent(Agent):
                 LLMMessage(role="system", content=f"STRICT REQUIREMENT: You are a Product Manager for a {requirements} project. You MUST generate a PRD ONLY for a {requirements}. DO NOT hallucinate e-commerce or marketing platforms."),
                 LLMMessage(role="user", content=f"Generate the PRD JSON for a {requirements}. Use ONLY this domain.")
             ]
-            response = await self.llm.generate(focus_messages, temperature=0.0)
+            response = await self.llm.generate(focus_messages, temperature=0.0, agent_name="ProductManager")
             raw_content = response.content.strip()
             content = raw_content
             logger.info("PM Agent Focus Pass completed.")

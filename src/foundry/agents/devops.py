@@ -147,7 +147,7 @@ class DevOpsAgent(Agent):
                     content="CRITICAL: Your previous response was not valid JSON. Return ONLY the requested JSON object without any preamble or markdown code blocks backticks."
                 ))
 
-            response = await self.llm.generate(messages, temperature=0.2, json_mode=True)
+            response = await self.llm.generate(messages, temperature=0.2, json_mode=True, agent_name="DevOps")
             
             # Robust JSON Parsing (BUG-DEV-2)
             try:
