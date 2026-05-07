@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import uuid
 import logging
+from foundry.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +102,9 @@ class SandboxEnvironment:
     """
     
     # Resource limits as per requirements
-    MAX_CPUS = 2
-    MAX_MEMORY_MB = 4096
+    MAX_CPUS = settings.sandbox_cpu_limit
+    # Parse memory limit string (e.g., "512m") to integer MB
+    MAX_MEMORY_MB = int(settings.sandbox_memory_limit.rstrip('m'))
     MAX_DISK_MB = 2048
     MAX_EXECUTION_TIME_SECONDS = 300  # 5 minutes
     

@@ -18,21 +18,34 @@ class LLMProviderFactory:
         model_name: Optional[str] = None,
         **kwargs
     ) -> BaseLLMProvider:
-        """Create LLM provider instance.
+        """Create LLM provider instance with optional failover."""
+        primary_name = provider_name or settings.default_llm_provider
         
-        Args:
-            provider_name: Provider name (ollama, vllm, openai, anthropic)
-            model_name: Model name to use
-            **kwargs: Additional provider-specific configuration
+        if settings.enable_provider_failover:
+            from foundry.llm.failover_provider import FailoverLLMProvider
             
-        Returns:
-            BaseLLMProvider instance
+            providers = []
+            # Primary provider
+            providers.append(LLMProviderFactory._get_single_provider(primary_name, model_name, **kwargs))
             
-        Raises:
-            ValueError: If provider is not supported
-        """
-        provider = provider_name or settings.default_llm_provider
-        
+            # Backup: fallback to OpenAI if not primary and key is available
+            if primary_name != "openai" and settings.openai_api_key:
+                providers.append(OpenAIProvider(model_name=settings.openai_model_name))
+                
+            # Backup: fallback to Ollama if not primary
+            if primary_name != "ollama":
+                providers.append(OllamaProvider(model_name=settings.ollama_model_name))
+                
+            return FailoverLLMProvider(providers)
+            
+        return LLMProviderFactory._get_single_provider(primary_name, model_name, **kwargs)
+
+    @staticmethod
+    def _get_single_provider(
+        provider: str,
+        model_name: Optional[str] = None,
+        **kwargs
+    ) -> BaseLLMProvider:
         if provider == "ollama":
             return OllamaProvider(model_name=model_name, **kwargs)
         elif provider == "vllm":

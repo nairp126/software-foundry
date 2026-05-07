@@ -59,15 +59,14 @@ class KnowledgeGraphService:
         """Store a code component in the graph."""
         query = """
         MATCH (p:Project {id: $project_id})
-        CREATE (c:Component {
-            id: $component_id,
-            name: $name,
-            type: $component_type,
-            file_path: $file_path,
-            metadata: $metadata,
-            created_at: datetime()
-        })
-        CREATE (p)-[:CONTAINS]->(c)
+        MERGE (c:Component {id: $component_id})
+        SET c.name = $name,
+            c.type = $component_type,
+            c.file_path = $file_path,
+            c.metadata = $metadata,
+            c.created_at = coalesce(c.created_at, datetime()),
+            c.updated_at = datetime()
+        MERGE (p)-[:CONTAINS]->(c)
         RETURN c
         """
         await self.client.execute_write(
@@ -97,24 +96,23 @@ class KnowledgeGraphService:
         """Store a function node in the graph."""
         query = """
         MATCH (p:Project {id: $project_id})
-        CREATE (f:Function {
-            id: $function_id,
-            name: $name,
-            signature: $signature,
-            file_path: $file_path,
-            line_number: $line_number,
-            complexity: $complexity,
-            content: $content,
-            created_at: datetime()
-        })
-        CREATE (p)-[:CONTAINS]->(f)
+        MERGE (f:Function {id: $function_id})
+        SET f.name = $name,
+            f.signature = $signature,
+            f.file_path = $file_path,
+            f.line_number = $line_number,
+            f.complexity = $complexity,
+            f.content = $content,
+            f.created_at = coalesce(f.created_at, datetime()),
+            f.updated_at = datetime()
+        MERGE (p)-[:CONTAINS]->(f)
         """
         
         if parent_component_id:
             query += """
             WITH f
             MATCH (c:Component {id: $parent_component_id})
-            CREATE (c)-[:DEFINES]->(f)
+            MERGE (c)-[:DEFINES]->(f)
             """
         
         query += " RETURN f"
@@ -149,24 +147,23 @@ class KnowledgeGraphService:
         """Store a class node in the graph."""
         query = """
         MATCH (p:Project {id: $project_id})
-        CREATE (c:Class {
-            id: $class_id,
-            name: $name,
-            file_path: $file_path,
-            line_number: $line_number,
-            methods: $methods,
-            base_classes: $base_classes,
-            content: $content,
-            created_at: datetime()
-        })
-        CREATE (p)-[:CONTAINS]->(c)
+        MERGE (c:Class {id: $class_id})
+        SET c.name = $name,
+            c.file_path = $file_path,
+            c.line_number = $line_number,
+            c.methods = $methods,
+            c.base_classes = $base_classes,
+            c.content = $content,
+            c.created_at = coalesce(c.created_at, datetime()),
+            c.updated_at = datetime()
+        MERGE (p)-[:CONTAINS]->(c)
         """
         
         if parent_component_id:
             query += """
             WITH c
             MATCH (comp:Component {id: $parent_component_id})
-            CREATE (comp)-[:DEFINES]->(c)
+            MERGE (comp)-[:DEFINES]->(c)
             """
         
         query += " RETURN c"
@@ -197,11 +194,11 @@ class KnowledgeGraphService:
         query = """
         MATCH (from:Component {id: $from_id})
         MATCH (to:Component {id: $to_id})
-        CREATE (from)-[r:DEPENDS_ON {
-            type: $dependency_type,
-            metadata: $metadata,
-            created_at: datetime()
-        }]->(to)
+        MERGE (from)-[r:DEPENDS_ON]->(to)
+        SET r.type = $dependency_type,
+            r.metadata = $metadata,
+            r.created_at = coalesce(r.created_at, datetime()),
+            r.updated_at = datetime()
         RETURN r
         """
         await self.client.execute_write(

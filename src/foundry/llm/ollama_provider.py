@@ -117,7 +117,7 @@ class OllamaProvider(BaseLLMProvider):
             # Estimate context size (chars / 4 approx tokens)
             context_size = sum(len(m.content) for m in messages) // 4
             
-            async with vram_manager.acquire_slot(agent_name=agent_name, provider="ollama", context_size=context_size):
+            async with vram_manager.acquire_slot(agent_name=agent_name, provider="ollama", context_size=context_size, provider_instance=self):
                 logger.info(f"LLM Request starting (Model: {self.model_name}, Agent: {agent_name}, Context: {context_size} tokens)")
                 response = await asyncio.wait_for(
                     self.client.post(

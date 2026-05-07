@@ -60,6 +60,9 @@ class ReflexionEngine(Agent):
             self.kg_tools = KnowledgeGraphTools()
         except Exception:
             self.kg_tools = None
+            
+        # Stub recurrence tracking (Feature 4)
+        self.stub_history = {} # Maps project_id:filename to recurrence count
         
     async def process_message(self, message: AgentMessage) -> AgentMessage:
         """Process incoming messages."""
@@ -487,6 +490,8 @@ class ReflexionEngine(Agent):
                 # COMPLETENESS CHECK: Detect stub functions
                 stub_files = self._find_stub_files(current_repo, language)
                 if not stub_files:
+                    # Clear stub history on success
+                    for f in current_repo: self.stub_history.pop(f"{project_id}:{f}", None)
                     logger.info("Code executed successfully!")
                     return AgentMessage(
                         sender=self.agent_type,
@@ -507,16 +512,19 @@ class ReflexionEngine(Agent):
                     )
                 else:
                     logger.warning(f"Execution passed but {len(stub_files)} files contain stub functions: {list(stub_files.keys())}")
-                    # Synthesize a fake error to trigger the fix loop
-                    result = ExecutionResult(
-                        success=False,
-                        stdout=result.stdout,
-                        stderr=f"INCOMPLETE IMPLEMENTATION: The following files contain empty function bodies (pass/...): {', '.join(stub_files.keys())}. Each function must contain real implementation logic.",
-                        exit_code=1,
-                        execution_time=result.execution_time,
-                        resource_usage=result.resource_usage,
-                        errors=[f"Stub function in {f}: {desc}" for f, desc in stub_files.items()]
-                    )
+                    
+                    # Track recurrence (Feature 4)
+                    for f in stub_files:
+                        key = f"{project_id}:{f}"
+                        self.stub_history[key] = self.stub_history.get(key, 0) + 1
+                        if self.stub_history[key] >= 2:
+                            logger.error(f"STUB RECURRENCE DETECTED for {f}. Escalating severity.")
+                            # Force failure and add persistent warning to result
+                            result.stderr += f"\nCRITICAL: Recurring stub detected in {f}. STOP using placeholders!"
+
+                    # PATENT-CRITICAL: _synthesize_semantic_failure converts a runtime-success
+                    # state into a semantic failure signal using static analysis results alone.
+                    result = self._synthesize_semantic_failure(stub_files, result)
             
             # Check if should escalate
             if self.should_escalate(attempt, result):
@@ -811,25 +819,198 @@ class ReflexionEngine(Agent):
             }
         )
 
-    def _find_stub_files(self, code_repo: Dict[str, str], language: str) -> Dict[str, str]:
-        """Find files that contain stub/empty function implementations."""
-        if language != "python":
-            return {}
-        
-        stub_files = {}
-        stub_pattern = re.compile(
-            r'(def\s+(\w+)\([^)]*\).*:\s*\n'       # function signature
-            r'(?:\s+(?:"""[^"]*"""|\'\'\'[^\']*\'\'\')?\s*\n)?'  # optional docstring
-            r'\s+pass\s*$)',                          # just pass
-            re.MULTILINE
+    def _synthesize_semantic_failure(
+        self,
+        stub_files: Dict[str, str],
+        prior_result: ExecutionResult
+    ) -> ExecutionResult:
+        """
+        PATENT-CRITICAL METHOD: Semantic Completeness Verification via Execution-State Synthesis.
+
+        This method implements the core novelty of the Semantic Completeness Verification
+        mechanism. It accepts a runtime-success ExecutionResult (exit_code=0, success=True)
+        and converts it into a semantic failure state based solely on static analysis
+        of the generated code's function bodies.
+
+        The conversion is necessary because conventional execution pipelines cannot
+        distinguish between (a) code that runs to completion correctly and (b) code that
+        runs to completion by executing meaningless placeholder bodies. Both produce
+        exit_code=0. This method bridges that gap by synthesizing a failure signal that
+        the reflexion loop can act on as if a runtime error had occurred.
+
+        Args:
+            stub_files: Dict mapping filenames to descriptions of incomplete functions,
+                        as returned by _find_stub_files().
+            prior_result: The ExecutionResult from the most recent sandbox run,
+                          which had success=True but semantic incompleteness.
+
+        Returns:
+            A new ExecutionResult with success=False and a synthesized stderr message
+            describing the semantic failure, ready for injection into the reflexion loop.
+        """
+        stub_description = "; ".join([
+            f"{fname}: {desc}" for fname, desc in stub_files.items()
+        ])
+        synthesized_stderr = (
+            f"SEMANTIC_COMPLETENESS_FAILURE: Static analysis detected {len(stub_files)} "
+            f"file(s) with incomplete function implementations after successful execution. "
+            f"Affected files: {stub_description}. "
+            f"Each function must contain real implementation logic, not placeholder bodies."
         )
-        for filename, content in code_repo.items():
-            if not filename.endswith('.py') or '__init__' in filename:
-                continue
-            matches = stub_pattern.findall(content)
-            if matches:
-                func_names = [m[1] for m in matches]
-                stub_files[filename] = f"Empty functions: {', '.join(func_names)}"
+        logger.warning(
+            f"[SemanticCompletenessVerification] Synthesizing failure from success state. "
+            f"Stub files detected: {list(stub_files.keys())}"
+        )
+        return ExecutionResult(
+            success=False,
+            stdout=prior_result.stdout,
+            stderr=synthesized_stderr,
+            exit_code=1,
+            execution_time=prior_result.execution_time,
+            resource_usage=prior_result.resource_usage,
+            errors=[f"Stub: {fname}" for fname in stub_files]
+        )
+
+    def _find_stub_files(self, code_repo: Dict[str, str], language: str) -> Dict[str, str]:
+        """
+        PATENT-CRITICAL: Converts a syntactic execution-success state into a semantic
+        failure state by detecting incomplete function implementations via static analysis.
+        
+        This is the core of the Semantic Completeness Verification mechanism: even when
+        the generated code executes without error (exit_code=0), this method detects
+        functions that exist only as declarations with no meaningful implementation.
+        The caller synthesizes a failure ExecutionResult from this static finding,
+        re-injecting the failure signal into the reflexion loop without any actual
+        runtime failure having occurred.
+        """
+        stub_files = {}
+
+        if language == "python":
+            stub_patterns = [
+                # Pattern 1: function with only 'pass' or '...' (with optional docstring)
+                re.compile(
+                    r'def\s+(\w+)\([^)]*\).*:\s*\n'
+                    r'(?:\s+(?:"""[^"]*"""|\'\'\'[^\']*\'\'\')\s*\n)?'
+                    r'\s+(pass|\.\.\.)\s*$',
+                    re.MULTILINE
+                ),
+                # Pattern 2: function that only raises NotImplementedError
+                re.compile(
+                    r'def\s+(\w+)\([^)]*\).*:\s*\n'
+                    r'(?:\s+(?:"""[^"]*"""|\'\'\'[^\']*\'\'\')\s*\n)?'
+                    r'\s+raise\s+NotImplementedError',
+                    re.MULTILINE
+                ),
+                # Pattern 3: empty try-except with pass in handler
+                re.compile(
+                    r'def\s+(\w+)\([^)]*\).*:\s*\n\s+try:\s*\n\s+pass\s*\n\s+except',
+                    re.MULTILINE
+                ),
+                # Pattern 4: function with only a return None and no logic
+                re.compile(
+                    r'def\s+(\w+)\([^)]*\).*:\s*\n'
+                    r'(?:\s+(?:"""[^"]*"""|\'\'\'[^\']*\'\'\')\s*\n)?'
+                    r'\s+return\s+None\s*$',
+                    re.MULTILINE
+                ),
+            ]
+            for filename, content in code_repo.items():
+                if not filename.endswith('.py') or '__init__' in filename:
+                    continue
+                stubs_found = []
+                for pattern in stub_patterns:
+                    for match in pattern.finditer(content):
+                        func_name = match.group(1) if match.lastindex >= 1 else "unknown"
+                        stubs_found.append(func_name)
+                if stubs_found:
+                    stub_files[filename] = f"Incomplete functions: {', '.join(set(stubs_found))}"
+
+        elif language in ("javascript", "typescript"):
+            js_stub_patterns = [
+                # Pattern 1: named function with empty body
+                re.compile(r'function\s+(\w+)\s*\([^)]*\)\s*\{\s*\}', re.MULTILINE),
+                # Pattern 2: arrow function assigned to const/let with empty body
+                re.compile(r'(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{\s*\}', re.MULTILINE),
+                # Pattern 3: TODO-only body (common LLM stub pattern)
+                re.compile(r'function\s+(\w+)\s*\([^)]*\)\s*\{\s*console\.log\(["\']TODO["\']', re.MULTILINE),
+                # Pattern 4: throw new Error("not implemented")
+                re.compile(r'function\s+(\w+)\s*\([^)]*\)\s*\{\s*throw\s+new\s+Error\(["\']not\s+implemented', re.MULTILINE | re.IGNORECASE),
+            ]
+            for filename, content in code_repo.items():
+                if not filename.endswith(('.js', '.ts', '.jsx', '.tsx')):
+                    continue
+                stubs_found = []
+                for pattern in js_stub_patterns:
+                    for match in pattern.finditer(content):
+                        func_name = match.group(1) if match.lastindex >= 1 else "unknown"
+                        stubs_found.append(func_name)
+                if stubs_found:
+                    stub_files[filename] = f"Incomplete functions: {', '.join(set(stubs_found))}"
+
+        elif language == "java":
+            java_stub_patterns = [
+                # Pattern 1: Empty method body
+                re.compile(r'(?:public|private|protected|static|\s)*[\w<>\s]+\s+(\w+)\s*\([^)]*\)\s*\{\s*\}', re.MULTILINE),
+                # Pattern 2: UnsupportedOperationException
+                re.compile(r'throw\s+new\s+UnsupportedOperationException\(', re.MULTILINE),
+                # Pattern 3: return null-only body
+                re.compile(r'\{\s*return\s+null;\s*\}', re.MULTILINE),
+                # Pattern 4: TODO-only body
+                re.compile(r'\{\s*//\s*TODO.*\}', re.MULTILINE),
+            ]
+            for filename, content in code_repo.items():
+                if not filename.endswith('.java'):
+                    continue
+                stubs_found = []
+                for pattern in java_stub_patterns:
+                    for match in pattern.finditer(content):
+                        func_name = match.group(1) if match.lastindex and match.lastindex >= 1 else "unknown"
+                        stubs_found.append(func_name)
+                if stubs_found:
+                    stub_files[filename] = f"Incomplete functions: {', '.join(set(stubs_found))}"
+
+        elif language == "go":
+            go_stub_patterns = [
+                # Pattern 1: Empty function body
+                re.compile(r'func\s+(\w+)\s*\([^)]*\)\s*(?:[\w\s,*()]+)?\s*\{\s*\}', re.MULTILINE),
+                # Pattern 2: panic("not implemented")
+                re.compile(r'panic\(["\']not\s+implemented["\']\)', re.MULTILINE | re.IGNORECASE),
+                # Pattern 3: return nil-only body
+                re.compile(r'\{\s*return\s+nil\s*\}', re.MULTILINE),
+            ]
+            for filename, content in code_repo.items():
+                if not filename.endswith('.go'):
+                    continue
+                stubs_found = []
+                for pattern in go_stub_patterns:
+                    for match in pattern.finditer(content):
+                        func_name = match.group(1) if match.lastindex and match.lastindex >= 1 else "unknown"
+                        stubs_found.append(func_name)
+                if stubs_found:
+                    stub_files[filename] = f"Incomplete functions: {', '.join(set(stubs_found))}"
+
+        elif language == "rust":
+            rust_stub_patterns = [
+                # Pattern 1: Empty function body
+                re.compile(r'fn\s+(\w+)\s*\([^)]*\)\s*(?:->\s*[\w\s,<>():]+)?\s*\{\s*\}', re.MULTILINE),
+                # Pattern 2: todo!() macro
+                re.compile(r'todo!\(\)', re.MULTILINE),
+                # Pattern 3: unimplemented!() macro
+                re.compile(r'unimplemented!\(\)', re.MULTILINE),
+                # Pattern 4: panic!("not implemented")
+                re.compile(r'panic!\(["\']not\s+implemented["\']\)', re.MULTILINE | re.IGNORECASE),
+            ]
+            for filename, content in code_repo.items():
+                if not filename.endswith('.rs'):
+                    continue
+                stubs_found = []
+                for pattern in rust_stub_patterns:
+                    for match in pattern.finditer(content):
+                        func_name = match.group(1) if match.lastindex and match.lastindex >= 1 else "unknown"
+                        stubs_found.append(func_name)
+                if stubs_found:
+                    stub_files[filename] = f"Incomplete functions: {', '.join(set(stubs_found))}"
+
         return stub_files
 
 

@@ -75,7 +75,7 @@ async def stress_test():
     
     # 2. Test Metric Flushing
     project_id = "vram_test_project"
-    vram_manager.flush_metrics(project_id)
+    await vram_manager.flush_metrics(project_id)
     
     # 3. Test OOM Prediction (Simulate rapid VRAM drop)
     logger.info("Testing OOM prediction logic...")

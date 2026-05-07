@@ -360,7 +360,7 @@ class EngineerAgent(Agent):
                 logger.info(f"Patent metrics flushed to: {report_path}")
         
         # Flush VRAM metrics
-        vram_manager.flush_metrics(project_id)
+        await vram_manager.flush_metrics(project_id)
 
         quality_result = await self.run_quality_gates(final_repo, language, "/tmp/project")
         integration_report = self._validate_component_integration(final_repo)

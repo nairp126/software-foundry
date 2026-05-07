@@ -13,11 +13,12 @@ from foundry.models.approval import (
 )
 from foundry.models.api_key import APIKey
 from foundry.models.execution import AgentExecution
+from foundry.models.inference_metric import InferenceMetric
 
 __all__ = [
     "Project", "ProjectStatus",
     "Artifact", "ArtifactType",
     "ApprovalRequest", "ApprovalStatus", "ApprovalType", "ApprovalPolicy",
     "ApprovalContent", "ApprovalResponse", "ApprovalRequestCreate",
-    "APIKey", "AgentExecution",
+    "APIKey", "AgentExecution", "InferenceMetric",
 ]

@@ -16,6 +16,10 @@ class SurgicalContextMetrics:
     import_errors_detected: int = 0
     symbols_resolved: int = 0
     path_used: str = "unknown"  # "kg_surgical" or "fallback_truncation"
+    # PATENT-CRITICAL: Stub detection metrics for empirical rate tracking
+    stub_functions_detected: int = 0      # count of stub functions found
+    stub_detection_triggered: bool = False # whether synthetic failure was injected
+    model_name: str = ""                  # which LLM produced this output
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 class MetricsCollector:

@@ -72,7 +72,7 @@ class VLLMProvider(BaseLLMProvider):
         # Estimate context size
         context_size = sum(len(m.content) for m in messages) // 4
         
-        async with vram_manager.acquire_slot(agent_name=agent_name, provider="vllm", context_size=context_size):
+        async with vram_manager.acquire_slot(agent_name=agent_name, provider="vllm", context_size=context_size, provider_instance=self):
             response = await self.client.post(
                 f"{self.base_url}/chat/completions",
                 json=payload,

@@ -104,6 +104,18 @@ class Settings(BaseSettings):
     # VRAM Budget Manager
     vram_context_overhead_factor: float = Field(default=1.25)
     max_concurrent_agents: int = Field(default=4)
+    vram_acquire_timeout_seconds: float = Field(default=120.0)
+    enable_kv_calibration: bool = Field(default=True)
+    vram_recovery_patience: int = Field(default=5)
+
+    # Sandbox Limits
+    sandbox_memory_limit: str = Field(default="512m")
+    sandbox_cpu_limit: float = Field(default=1.0)
+
+    # Provider Failover
+    enable_provider_failover: bool = Field(default=False)
+    fallback_llm_provider: str = Field(default="vllm")
+    provider_failover_retry_delay: float = Field(default=2.0)
 
 
 settings = Settings()
