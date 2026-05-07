@@ -193,6 +193,9 @@ class VRAMBudgetManager:
         self._calibrated = False
         self._gb_per_1k_tokens = self.KV_CACHE_GB_PER_1K_TOKENS
         
+        # Hysteresis state
+        self._is_throttled = False
+        
         logger.info(f"VRAM Manager initialized. Model: {self.model_name}, Limit: {self.concurrency_limit}, VRAM Est: {self.model_vram_gb}GB")
 
     def _query_all_gpus(self) -> List[GPUDevice]:
@@ -258,57 +261,71 @@ class VRAMBudgetManager:
 
     def _check_oom_risk(self):
         """
-        PATENT-CRITICAL: Graduated Concurrency Decay & Recovery (Feature 2).
-        Uses a PID-like response to VRAM volatility:
-        - Critical Risk: 50% reduction if VRAM < 5% or slope < -1GB/call
-        - Moderate Risk: -1 reduction if projected VRAM < 1GB
-        - Stability: +1 recovery if stable for N calls (vram_recovery_patience)
+        PATENT-CRITICAL: Mathematically-Derived Exponential Decay with Hysteresis.
+        Replaces the discrete two-tier drop with a continuous exponential curve 
+        and formal hysteresis band to prevent system thrashing.
         """
-        if len(self._vram_history) < 3:
+        if not self.devices or len(self._vram_history) < 3:
             return
             
         recent = self._vram_history[-5:]
         vram_now = recent[-1][1]
-        # Calculate slope: MB change per inference
-        slope = (recent[-1][1] - recent[0][1]) / (len(recent) - 1)
-        
-        # 1. Critical Decay: immediate 50% drop if extremely low or crashing
         total_vram = sum(d.total_vram_mb for d in self.devices)
-        if vram_now < (total_vram * 0.05) or slope < -1000:
-             new_limit = max(1, self.concurrency_limit // 2)
-             if new_limit < self.concurrency_limit:
-                 logger.warning(f"CRITICAL OOM RISK: VRAM at {vram_now}MB. Applying 50% decay: {self.concurrency_limit} -> {new_limit}")
-                 self.concurrency_limit = new_limit
-                 self._semaphore.set_limit(new_limit)
-                 self._stable_calls = 0
-                 return
-
-        # 2. Moderate Decay
-        if slope < -100:  # Losing more than 100MB per call
-            projected_vram = vram_now + (slope * 3)
-            if projected_vram < 1000:
-                new_limit = max(1, self.concurrency_limit - 1)
-                if new_limit < self.concurrency_limit:
-                    logger.warning(f"Moderate OOM risk (slope: {slope:.1f}MB/call). Throttling: {self.concurrency_limit} -> {new_limit}")
-                    self.concurrency_limit = new_limit
-                    self._semaphore.set_limit(new_limit)
-                    self._stable_calls = 0
-                    return
+        if total_vram == 0:
+            return
+            
+        # 1. Hysteresis Band Definition
+        v_low = total_vram * settings.vram_hysteresis_low_pct
+        v_high = total_vram * settings.vram_hysteresis_high_pct
         
-        # 3. Recovery: if slope is flat/positive and we have headroom
-        if slope >= 0 and vram_now > (total_vram * 0.2):
-            self._stable_calls += 1
-            if self._stable_calls >= settings.vram_recovery_patience:
-                # Can we increase?
+        # 2. State Evaluation
+        if vram_now < v_low:
+            self._is_throttled = True
+            
+            # Exponential Decay Function
+            # Severity bounded between 0 and 1 (can exceed 1 if severely crashed)
+            import math
+            severity = (v_low - vram_now) / v_low
+            k = settings.vram_decay_coefficient
+            
+            # L_new = max(1, floor(L_current * e^(-k * severity)))
+            new_limit = max(1, math.floor(self.concurrency_limit * math.exp(-k * severity)))
+            
+            if new_limit < self.concurrency_limit:
+                logger.warning(f"OOM RISK DECAY: VRAM {vram_now:.0f}MB < {v_low:.0f}MB. Severity {severity:.2f}. "
+                               f"Exponential drop applied: {self.concurrency_limit} -> {new_limit}")
+                self.concurrency_limit = new_limit
+                self._semaphore.set_limit(new_limit)
+                
+        elif vram_now > v_high:
+            if self._is_throttled:
+                # Target unconstrained limit based on derivation formula
                 target_limit = self._compute_limit()
+                
                 if self.concurrency_limit < target_limit:
-                    new_limit = self.concurrency_limit + 1
-                    logger.info(f"VRAM Stability detected ({self._stable_calls} calls). Recovering concurrency: {self.concurrency_limit} -> {new_limit}")
-                    self.concurrency_limit = new_limit
-                    self._semaphore.set_limit(new_limit)
-                    self._stable_calls = 0
+                    # Asymptotic Recovery Function
+                    import math
+                    r = settings.vram_recovery_coefficient
+                    # L_new = min(L_target, ceil(L_current + (L_target - L_current) * (1 - e^(-r))))
+                    recovery_step = (target_limit - self.concurrency_limit) * (1.0 - math.exp(-r))
+                    new_limit = min(target_limit, math.ceil(self.concurrency_limit + recovery_step))
+                    
+                    if new_limit > self.concurrency_limit:
+                        logger.info(f"VRAM RECOVERY: VRAM {vram_now:.0f}MB > {v_high:.0f}MB. "
+                                    f"Asymptotic ramp applied: {self.concurrency_limit} -> {new_limit}")
+                        self.concurrency_limit = new_limit
+                        self._semaphore.set_limit(new_limit)
+                    
+                    # If we reached the target, we are no longer throttled
+                    if self.concurrency_limit >= target_limit:
+                        self._is_throttled = False
+                else:
+                    self._is_throttled = False
+                    
         else:
-            self._stable_calls = 0
+            # Hysteresis Band (v_low <= vram_now <= v_high)
+            # HOLD state - prevent thrashing by maintaining current limit
+            pass
 
     @asynccontextmanager
     async def acquire_slot(

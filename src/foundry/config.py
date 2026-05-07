@@ -101,12 +101,15 @@ class Settings(BaseSettings):
     # Patent Readiness / A/B Testing
     enable_kg: bool = Field(default=True)
 
-    # VRAM Budget Manager
+    # VRAM Budget Manager (Mathematical Model)
     vram_context_overhead_factor: float = Field(default=1.25)
     max_concurrent_agents: int = Field(default=4)
     vram_acquire_timeout_seconds: float = Field(default=120.0)
     enable_kv_calibration: bool = Field(default=True)
-    vram_recovery_patience: int = Field(default=5)
+    vram_decay_coefficient: float = Field(default=2.0)
+    vram_hysteresis_low_pct: float = Field(default=0.10)
+    vram_hysteresis_high_pct: float = Field(default=0.25)
+    vram_recovery_coefficient: float = Field(default=0.5)
 
     # Sandbox Limits
     sandbox_memory_limit: str = Field(default="512m")
